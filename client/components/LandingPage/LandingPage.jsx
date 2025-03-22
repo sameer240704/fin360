@@ -22,7 +22,7 @@ import { Apple, Google } from "@/public/icons";
 import Link from "next/link";
 import Phone from "./Phone";
 
-const UnineLandingPage = () => {
+const Fin360LandingPage = () => {
   const [isScrolled, setIsScrolled] = useState(false);
 
   useEffect(() => {
@@ -37,18 +37,18 @@ const UnineLandingPage = () => {
   return (
     <div className="flex flex-col min-h-screen bg-white">
       <Navbar isScrolled={isScrolled} />
-
       <section className="h-screen bg-black text-white flex items-center">
         <div className="container mx-auto px-4 flex flex-col md:flex-row items-center h-full py-8">
           <div className="max-md:w-1/2 mb-8 max-md:mb-0 w-full">
-            <h1 className="text-8xl max-md:text-5xl max-lg:text-6xl font-bold mb-6">
-              More Payment Options <br />
-              <h1 className="mt-3">Better than Cash</h1>
+            <h1 className="text-7xl max-md:text-5xl max-lg:text-6xl font-bold mb-6">
+              Automate Financial Analysis <br />
+              <h1 className="mt-3">with AI-Powered Insights</h1>
             </h1>
-            <p className="text-gray-300 mb-8 text-lg max-w-xl">
-              With Fin360, you can access more than 240 million customers out
-              there, as well as offering management tools, options and payment
-              methods.
+            <p className="text-gray-300 mb-8 text-lg max-w-2xl">
+              Transform the way you analyze financial statements. Our AI-driven
+              platform extracts, interprets, and delivers actionable insights
+              from balance sheets, income statements, and cash flow statements
+              in real-time.
             </p>
 
             <div className="flex flex-wrap gap-4 mb-8">
@@ -104,7 +104,6 @@ const UnineLandingPage = () => {
           </div>
         </div>
       </section>
-
       <section className="py-16 bg-white">
         <div className="container mx-auto px-4 text-center mb-12">
           <h2 className="text-2xl font-bold mb-2">
@@ -167,7 +166,6 @@ const UnineLandingPage = () => {
           </Card>
         </div>
       </section>
-
       {/* Bank Account Section */}
       <section className="py-16 bg-gray-50">
         <div className="container mx-auto px-4 flex flex-col md:flex-row items-center">
@@ -210,7 +208,6 @@ const UnineLandingPage = () => {
           </div>
         </div>
       </section>
-
       {/* Payment Management Section */}
       <section className="py-16 bg-white">
         <div className="container mx-auto px-4 flex flex-col md:flex-row">
@@ -262,7 +259,6 @@ const UnineLandingPage = () => {
           </div>
         </div>
       </section>
-
       {/* Testimonials Section */}
       <section className="py-16 bg-gray-50">
         <div className="container mx-auto px-4">
@@ -375,7 +371,6 @@ const UnineLandingPage = () => {
           </div>
         </div>
       </section>
-
       {/* Download CTA */}
       <section className="py-12 bg-green-400">
         <div className="container mx-auto px-4 text-center">
@@ -410,7 +405,6 @@ const UnineLandingPage = () => {
           </div>
         </div>
       </section>
-
       {/* Footer */}
       <footer className="py-12 bg-black text-white">
         <div className="container mx-auto px-4">
@@ -482,4 +476,4 @@ const UnineLandingPage = () => {
   );
 };
 
-export default UnineLandingPage;
+export default Fin360LandingPage;
