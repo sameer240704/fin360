@@ -1,0 +1,552 @@
+from fastapi import FastAPI, Form, HTTPException, Body, UploadFile, File
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import JSONResponse, FileResponse
+from fastapi.middleware.cors import CORSMiddleware
+from PyPDF2 import PdfReader
+from typing import List, Dict, Optional
+import io
+import os
+import uuid
+import base64
+import tempfile
+from typing import List, Optional
+from dotenv import load_dotenv
+from services.gemini_game_flow import get_gemini_response
+from services.stocks_data import fetch_multiple_stocks
+from python_types.types import StockItem, ProphetRequest
+from services.reports import get_file_hash, extract_text_with_mistral, analyze_with_gemini, chat_with_gemini_simple, chat_with_gemini_faiss, split_into_chunks, build_faiss_index
+from predictive_analysis import prophet_stock
+import stocks_data
+from services.chatbot import search_companies_by_query, SearchCompaniesRequest, initialize_graph_database, clear_chat, display_chat, generate_response, add_to_chat, genai, state, init_state, get_pdf_files_from_folders, ProcessDocumentsRequest, generate_database_id, get_existing_faiss_indexes, VectorDatabase, extract_text_with_links, ChatRequest
+from services.business_model import extract_text, generate_business_models, generate_pdf
+from services.sentimental_analysis import extract_text_from_pdf, analyze_sentiment, create_pdf_report
+
+load_dotenv()
+
+app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+app.mount("/generated_pdfs", StaticFiles(directory="generated_pdfs"), name="generated_pdfs")
+
+analysis_cache: Dict[str, dict] = {}  # {file_hash: {file_name, extracted_text, analysis_result, faiss_index, embeddings}}
+chat_histories: Dict[str, List[dict]] = {}  # {file_hash: [{role, content, image (optional)}]}
+
+@app.post("/ai-financial-path")
+async def ai_financial_path(
+    input: str = Form(...),
+    risk: Optional[str] = Form("conservative")
+):
+    try:
+        response = get_gemini_response(input, risk)  
+        return JSONResponse(content=response, status_code=200)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Something went wrong: {str(e)}")
+    
+@app.post("/stocks")
+async def process_stocks(stocks_data: List[StockItem] = Body(...)):
+    """
+    Processes a list of stocks from the frontend and returns enriched data.
+    
+    Expects an array of stock objects in the request body.
+    Returns the same array with additional market data.
+    """
+    try:
+        if not stocks_data:
+            raise HTTPException(status_code=400, detail="No stock data provided")
+        
+        ticker_symbols = [stock.tickerSymbol for stock in stocks_data]
+        
+        all_stock_data = fetch_multiple_stocks(ticker_symbols, delay_between_requests=1)
+        
+        enriched_stocks = []
+        total_portfolio_value = 0
+        failed_tickers = []
+        
+        for stock in stocks_data:
+            stock_info = all_stock_data.get(stock.tickerSymbol, {"currentPrice": None, "dividendYield": None})
+            
+            if stock_info["currentPrice"] is None:
+                failed_tickers.append(stock.tickerSymbol)
+                continue
+            
+            unrealized_gains_losses = round((stock_info["currentPrice"] - stock.purchasePrice) * stock.numberOfShares, 2)
+            
+            stock_value = stock_info["currentPrice"] * stock.numberOfShares
+            total_portfolio_value += stock_value
+            
+            enriched_stock = stock.dict()
+            enriched_stock.update({
+                "currentPrice": stock_info["currentPrice"],
+                "unrealizedGainsLosses": unrealized_gains_losses,
+                "dividendYield": stock_info["dividendYield"],
+                "stockValue": round(stock_value, 2)
+            })
+            
+            enriched_stocks.append(enriched_stock)
+        
+        if len(failed_tickers) == len(ticker_symbols):
+            raise HTTPException(
+                status_code=503, 
+                detail="Service temporarily unavailable. Could not fetch any stock data due to rate limiting."
+            )
+        
+        for stock in enriched_stocks:
+            stock["weightageInPortfolio"] = round((stock["stockValue"] / total_portfolio_value) * 100, 2) if total_portfolio_value > 0 else 0
+        
+        response_data = {
+            "message": "Stock data processed successfully!",
+            "totalPortfolioValue": round(total_portfolio_value, 2),
+            "stocks": enriched_stocks
+        }
+    
+        if failed_tickers:
+            response_data["warnings"] = f"Could not fetch data for these tickers: {', '.join(failed_tickers)}"
+        
+        return JSONResponse(content=response_data, status_code=200)
+        
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error processing stocks: {str(e)}")
+    
+
+@app.post("/analyze")
+async def analyze_file(file: UploadFile = File(...), pages: Optional[str] = Form(None)):
+    """Process and analyze uploaded PDF file"""
+    if not file.filename.endswith('.pdf'):
+        raise HTTPException(status_code=400, detail="Only PDF files are supported")
+    
+    file_content = await file.read()
+    file_hash = get_file_hash(file_content)
+
+    if file_hash in analysis_cache:
+        return {
+            "file_hash": file_hash,
+            "file_name": analysis_cache[file_hash]["file_name"],
+            "extracted_text": analysis_cache[file_hash]["extracted_text"],
+            "analysis_result": analysis_cache[file_hash]["analysis_result"]
+        }
+    
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as temp_file:
+            temp_file.write(file_content)
+            temp_file_path = temp_file.name
+
+        pdf_reader = PdfReader(io.BytesIO(file_content))
+        num_pages = len(pdf_reader.pages)
+        
+        pages_to_process = [int(p) for p in pages.split(',')] if pages else list(range(num_pages))
+        if any(p >= num_pages or p < 0 for p in pages_to_process):
+            raise HTTPException(status_code=400, detail="Invalid page numbers")
+    
+        ocr_result = extract_text_with_mistral(file_content, file.filename, pages_to_process)
+        if not ocr_result:
+            raise HTTPException(status_code=500, detail="Failed to extract text from PDF")
+        
+        all_text = ""
+        for page in ocr_result.get("pages", []):
+            all_text += page.get("markdown", "") + "\n\n"
+        
+        analysis = analyze_with_gemini(all_text)
+        
+        context_chunks = split_into_chunks(all_text)
+        faiss_index, embeddings = build_faiss_index(context_chunks)
+        
+        analysis_cache[file_hash] = {
+            "file_name": file.filename,
+            "extracted_text": all_text,
+            "analysis_result": analysis,
+            "faiss_index": faiss_index,
+            "embeddings": embeddings,
+            "context_chunks": context_chunks,
+            "file_path": temp_file_path
+        }
+        
+        chat_histories[file_hash] = []
+        
+        return {
+            "file_hash": file_hash,
+            "file_name": file.filename,
+            "extracted_text": all_text,
+            "analysis_result": analysis
+        }
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error processing PDF: {str(e)}")
+    
+@app.get("/download/{file_hash}")
+async def download_pdf(file_hash: str):
+    """Download PDF file"""
+    if file_hash not in analysis_cache:
+        raise HTTPException(status_code=404, detail="File not found")
+    
+    file_path = analysis_cache[file_hash]["file_path"]
+    return FileResponse(
+        path=file_path,
+        media_type="application/pdf",
+        filename="financial_report.pdf",
+        content_disposition_type="attachment"
+    )
+
+@app.get("/download/{file_hash}/pdf")
+async def download_pdf_file(file_hash: str):
+    """
+    Serve the financial analysis PDF file for download.
+    """
+    file_path = os.path.join("generated_pdfs", f"financial_analysis.pdf")
+    
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="File not found")
+    
+    return FileResponse(
+        path=file_path,
+        media_type="application/pdf",
+        filename=f"financial_analysis.pdf",
+        content_disposition_type="attachment"
+    )
+
+@app.post("/chat")
+async def chat(
+    file_hash: str = Form(...),
+    context_type: str = Form(...),
+    query: str = Form(...),
+    use_faiss: str = Form("false"),  
+    image: Optional[UploadFile] = File(None)
+):
+    """Chat with the analyzed document, with or without FAISS"""
+    if file_hash not in analysis_cache:
+        raise HTTPException(status_code=404, detail="Document not found")
+    
+    context_data = analysis_cache[file_hash]
+    context = (
+        context_data["extracted_text"] if context_type == "extracted_text"
+        else context_data["analysis_result"]
+    )
+
+    image_bytes = await image.read() if image else None
+    
+    use_faiss_bool = use_faiss.lower() == "true"
+    
+    if use_faiss_bool:
+        if not context_data.get("faiss_index") or not context_data.get("context_chunks"):
+            raise HTTPException(status_code=400, detail="FAISS index not available for this document")
+        response = chat_with_gemini_faiss(
+            context_data["context_chunks"],
+            context_data["faiss_index"],
+            context,
+            query,
+            image_bytes
+        )
+    else:
+        response = chat_with_gemini_simple(context, query, image_bytes)
+
+    chat_entry = {"role": "user", "content": query}
+    if image:
+        chat_entry["image"] = base64.b64encode(image_bytes).decode('utf-8') 
+    chat_histories[file_hash].append(chat_entry)
+    chat_histories[file_hash].append({"role": "assistant", "content": response})
+    
+    return {
+        "response": response,
+        "chat_history": chat_histories[file_hash]
+    }
+
+@app.get("/chat_history/{file_hash}")
+async def get_chat_history(file_hash: str):
+    """Retrieve chat history for a specific file"""
+    if file_hash not in chat_histories:
+        raise HTTPException(status_code=404, detail="Chat history not found")
+    return {"chat_history": chat_histories[file_hash]}
+
+@app.get("/available_documents")
+async def get_available_documents():
+    """Retrieve all available document file hashes and names"""
+    return {
+        "documents": [
+            {"file_hash": file_hash, "file_name": data["file_name"]}
+            for file_hash, data in analysis_cache.items()
+        ]
+    }
+
+@app.post("/prophet_stock")
+async def prophet_stock_route(request: ProphetRequest):
+    try:
+        prophet_images = prophet_stock.main(request.years)
+        return JSONResponse(content={"prophet_images": prophet_images})
+    except Exception as e:
+        return JSONResponse(content={"error": str(e)}, status_code=500)
+    
+@app.get("/portfolio_data")
+async def get_stocks_data():
+    """
+    Handles GET requests to return the stored stock and bond data in JSON format.
+    """
+    try:
+        stocks_df = stocks_data.load_stocks_data()
+        bonds_data = stocks_data.load_bonds_data()
+        return JSONResponse(content={'stocks': stocks_df, 'bonds': bonds_data})
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    
+@app.on_event("startup")
+async def startup_event():
+    init_state()
+
+@app.get("/default_pdfs", response_model=Dict[str, List[Dict[str, str]]])
+async def get_default_pdfs():
+    default_pdfs = get_pdf_files_from_folders()
+    if not default_pdfs:
+        return {"departments": {}}
+    departments = {}
+    for pdf in default_pdfs:
+        if pdf["department"] not in departments:
+            departments[pdf["department"]] = []
+        departments[pdf["department"]].append(pdf["name"])
+    return {"departments": departments}
+
+@app.post("/process_documents")
+async def process_documents(
+    request: ProcessDocumentsRequest,
+    uploaded_files: Optional[List[UploadFile]] = File(None)
+):
+    default_pdfs = get_pdf_files_from_folders()
+    combined_pdfs = default_pdfs + ([{"name": file.filename, "content": file} for file in uploaded_files] if uploaded_files else [])
+
+    if not combined_pdfs:
+        raise HTTPException(status_code=400, detail="No PDFs to process")
+
+    db_id = generate_database_id(combined_pdfs)
+
+    if request.action == "Use Existing FAISS Index":
+        existing_indexes = get_existing_faiss_indexes()
+        if not existing_indexes:
+            raise HTTPException(status_code=404, detail="No existing FAISS indexes found")
+        if db_id not in existing_indexes:
+            raise HTTPException(status_code=404, detail=f"FAISS index {db_id} not found")
+        vector_db = VectorDatabase.load(db_id, "embedding-001")
+        if vector_db:
+            state['vector_db'] = vector_db
+            state['db_id'] = db_id
+            processed_files = set(meta.get("source", "").split(" (")[0] for meta in vector_db.document_metadata if "source" in meta)
+            state['processed_files'] = list(processed_files)
+            return {"message": f"Loaded FAISS index: {db_id}"}
+        else:
+            raise HTTPException(status_code=500, detail=f"Failed to load FAISS index: {db_id}")
+
+    elif request.action == "Process New Documents":
+        if request.force_reindex or db_id != state['db_id']:
+            vector_db = VectorDatabase("embedding-001")
+            total_files = len(combined_pdfs)
+            processed, skipped = 0, 0
+
+            for pdf in default_pdfs:
+                print(f"Processing {processed+1}/{total_files}: {pdf['name']}")
+                pdf_text = extract_text_with_links(pdf["path"])
+                if pdf_text.strip():
+                    metadata = {"source": f"{pdf['name']} (Department: {pdf['department']})", "type": "pdf"}
+                    chunks_added = vector_db.add_document(pdf_text, chunk_size=request.chunk_size, overlap=request.chunk_overlap, metadata=metadata)
+                    print(f"Added {chunks_added} chunks from {pdf['name']}")
+                else:
+                    if request.skip_empty_pdfs:
+                        print(f"Skipping {pdf['name']} - no text")
+                        skipped += 1
+                    else:
+                        metadata = {"source": f"{pdf['name']} (Department: {pdf['department']})", "type": "pdf"}
+                        vector_db.add_document("No text.", chunk_size=request.chunk_size, overlap=0, metadata=metadata)
+                processed += 1
+
+            if uploaded_files:
+                for file in uploaded_files:
+                    print(f"Processing {processed+1}/{total_files}: {file.filename}")
+                    pdf_text = extract_text_with_links(file.file)
+                    if pdf_text.strip():
+                        metadata = {"source": f"{file.filename} (Uploaded)", "type": "pdf"}
+                        chunks_added = vector_db.add_document(pdf_text, chunk_size=request.chunk_size, overlap=request.chunk_overlap, metadata=metadata)
+                        print(f"Added {chunks_added} chunks from {file.filename}")
+                    else:
+                        if request.skip_empty_pdfs:
+                            print(f"Skipping {file.filename} - no text")
+                            skipped += 1
+                        else:
+                            metadata = {"source": f"{file.filename} (Uploaded)", "type": "pdf"}
+                            vector_db.add_document("No text.", chunk_size=request.chunk_size, overlap=0, metadata=metadata)
+                    processed += 1
+
+            vector_db.save(db_id)
+            state['vector_db'] = vector_db
+            state['db_id'] = db_id
+            state['processed_files'] = [pdf["name"] for pdf in default_pdfs] + ([file.filename for file in uploaded_files] if uploaded_files else [])
+            return {"message": f"Processed {total_files - skipped} documents (skipped {skipped}) with ID: {db_id}"}
+        else:
+            vector_db = VectorDatabase.load(db_id, "embedding-001")
+            if vector_db:
+                state['vector_db'] = vector_db
+                state['db_id'] = db_id
+                return {"message": f"Loaded existing database with ID: {db_id}"}
+            else:
+                raise HTTPException(status_code=500, detail=f"Failed to load FAISS index: {db_id}")
+
+@app.post("/chatbot")
+async def chat(request: ChatRequest):
+    # if not state['vector_db'] and not state['graph_initialized']:
+    #     raise HTTPException(status_code=400, detail="Please process documents or initialize the graph database first")
+
+    model_options = request.model_options
+    model_instance = genai.GenerativeModel(
+        model_name=model_options.model_name if model_options.model_name.startswith("gemini") else "gemini-1.5-flash",
+        generation_config={
+            "temperature": model_options.temperature,
+            "top_p": model_options.top_p,
+            "max_output_tokens": model_options.max_tokens
+        }
+    ) if not model_options.model_name.startswith("llama") else None
+
+    add_to_chat("user", request.prompt)
+    response = generate_response(
+        request.prompt,
+        state['vector_db'],
+        model_instance,
+        model_options.model_name,
+        model_options.temperature,
+        model_options.top_p,
+        model_options.max_tokens,
+        model_options.context_window
+    )
+    add_to_chat("assistant", response)
+    return {"response": response, "chat_history": display_chat()}
+
+@app.get("/chat_history")
+async def get_chat_history():
+    return {"chat_history": display_chat()}
+
+@app.post("/clear_chat")
+async def clear_chat_endpoint():
+    clear_chat()
+    return {"message": "Chat history cleared!"}
+
+@app.post("/initialize_graph")
+async def initialize_graph():
+    result = initialize_graph_database()
+    return result
+
+@app.post("/search_companies")
+async def search_companies(request: SearchCompaniesRequest):
+    search_results = search_companies_by_query(request.search_text, request.limit)
+    if not search_results:
+        return {"message": "No companies found."}
+    return {"results": search_results}
+
+@app.get("/settings")
+async def get_settings():
+    settings = {}
+    if state['vector_db']:
+        settings["vector_db"] = {
+            "db_id": state['db_id'],
+            "chunk_count": len(state['vector_db'].document_chunks),
+            "processed_files": state['processed_files']
+        }
+    if state['graph_initialized']:
+        settings["graph_db"] = {"status": "Initialized"}
+    return {"settings": settings}
+    
+@app.post("/analyze/business_model")
+async def generate_business_model(
+    file: UploadFile = File(...),
+    annual_revenue: int = 1000000,
+    profit_margin: float = 15.0,
+    market_growth_rate: float = 5.0,
+    customer_acquisition_cost: int = 500,
+    customer_lifetime_value: int = 2000,
+):
+    """
+    Generates a business model based on the uploaded annual report and financial parameters.
+    Returns a link to download the generated PDF report.
+    """
+    if file.content_type not in ["application/pdf", "image/png", "image/jpeg", "text/csv"]:
+        raise HTTPException(status_code=400, detail="Invalid file type. Supported types: pdf, png, jpg, jpeg, csv")
+
+    file_path = f"temp_files/{uuid.uuid4()}_{file.filename}"
+    try:
+        os.makedirs("temp_files", exist_ok=True)
+        with open(file_path, "wb") as f:
+            f.write(await file.read())
+
+        file_text = extract_text(file_path, file.content_type)
+
+        financial_params = {
+            "annual_revenue": annual_revenue,
+            "profit_margin": profit_margin,
+            "market_growth_rate": market_growth_rate,
+            "customer_acquisition_cost": customer_acquisition_cost,
+            "customer_lifetime_value": customer_lifetime_value,
+        }
+
+        business_models = generate_business_models(financial_params, file_text)
+
+        pdf_filename = f"business_models_{uuid.uuid4()}.pdf"
+        pdf_path = os.path.join("generated_pdfs", pdf_filename)
+        os.makedirs("generated_pdfs", exist_ok=True)
+
+        generate_pdf(business_models, pdf_path)
+
+        return {"download_url": f"/api/download/{pdf_filename}"}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if os.path.exists(file_path):
+            os.remove(file_path)
+
+@app.post("/analyze/sentiment_analysis")
+async def analyze_pdf(file: UploadFile = File(...), company_name: Optional[str] = "JPMC") -> Dict:
+    """
+    Analyzes a PDF file, extracts text, performs sentiment analysis, and generates a PDF report.
+    Returns a dictionary containing the download link to the generated report.
+    """
+    if file.content_type != "application/pdf":
+        raise HTTPException(status_code=400, detail="Invalid file type. Only PDF files are allowed.")
+
+    try:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            file_path = os.path.join(tmpdir, file.filename)
+            with open(file_path, "wb") as f:
+                f.write(await file.read())
+
+            extracted_text = extract_text_from_pdf(file_path)
+
+            analysis = analyze_sentiment(extracted_text)
+
+            pdf_buffer = create_pdf_report(analysis, company_name)
+
+            pdf_filename = f"management_analysis_report_{uuid.uuid4()}.pdf"
+            pdf_path = os.path.join("generated_pdfs", pdf_filename)
+            os.makedirs("generated_pdfs", exist_ok=True)
+
+            with open(pdf_path, "wb") as f:
+                f.write(pdf_buffer.getvalue())
+
+            return {"download_url": f"/api/download/{pdf_filename}"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/download/{filename}")
+async def download_file(filename: str):
+    """
+    Serve the generated PDF files for download.
+    """
+    file_path = os.path.join("generated_pdfs", filename)
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="File not found")
+    
+    return FileResponse(
+        path=file_path,
+        filename=filename,
+        media_type="application/pdf"
+    )
