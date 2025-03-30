@@ -68,110 +68,7 @@ pdfjs.GlobalWorkerOptions.workerSrc = new URL(
 
 const ReportsPage = () => {
   const [selectedReport, setSelectedReport] = useState(null);
-  const [reports, setReports] = useState([
-    {
-      id: 1,
-      title: "Quarterly Financial Report",
-      date: "2025-03-15",
-      author: "Finance Team",
-      tags: ["financial", "quarterly"],
-      comments: [
-        {
-          id: 1,
-          author: "Jane Doe",
-          text: "Great insights on page 3",
-          date: "2025-03-16",
-        },
-      ],
-      versions: [
-        {
-          id: 1,
-          date: "2025-03-15",
-          author: "Finance Team",
-          notes: "Initial version",
-        },
-      ],
-      analysisResult: "",
-      extractedText: "",
-      file_hash: "mock_file_hash_1",
-    },
-    {
-      id: 2,
-      title: "Market Analysis 2025",
-      date: "2025-03-10",
-      author: "Marketing Dept",
-      tags: ["market", "analysis"],
-      comments: [],
-      versions: [
-        {
-          id: 1,
-          date: "2025-03-10",
-          author: "Marketing Dept",
-          notes: "Initial version",
-        },
-      ],
-      analysisResult: "",
-      extractedText: "",
-      file_hash: "mock_file_hash_2",
-    },
-    {
-      id: 3,
-      title: "Product Performance Review",
-      date: "2025-03-01",
-      author: "Product Team",
-      tags: ["product", "performance"],
-      comments: [],
-      versions: [
-        {
-          id: 1,
-          date: "2025-03-01",
-          author: "Product Team",
-          notes: "Initial version",
-        },
-      ],
-      analysisResult: "",
-      extractedText: "",
-      file_hash: "mock_file_hash_3",
-    },
-    {
-      id: 4,
-      title: "Competitor Analysis",
-      date: "2025-02-28",
-      author: "Strategic Dept",
-      tags: ["competitor", "analysis"],
-      comments: [],
-      versions: [
-        {
-          id: 1,
-          date: "2025-02-28",
-          author: "Strategic Dept",
-          notes: "Initial version",
-        },
-      ],
-      analysisResult: "",
-      extractedText: "",
-      file_hash: "mock_file_hash_4",
-    },
-    {
-      id: 5,
-      title: "Customer Satisfaction Survey",
-      date: "2025-02-15",
-      author: "Customer Success",
-      tags: ["customer", "survey"],
-      comments: [],
-      versions: [
-        {
-          id: 1,
-          date: "2025-02-15",
-          author: "Customer Success",
-          notes: "Initial version",
-        },
-      ],
-      analysisResult: "",
-      extractedText: "",
-      file_hash: "mock_file_hash_5",
-    },
-  ]);
+  const [reports, setReports] = useState([]);
 
   const [isSelecting, setIsSelecting] = useState(false);
   const [selectedArea, setSelectedArea] = useState(null);
@@ -491,8 +388,6 @@ const ReportsPage = () => {
           file_hash: result?.data?.file_hash,
         };
 
-        console.log(newReport);
-
         setReports((prevReports) => [newReport, ...prevReports]);
         setSelectedReport(newReport);
         setIsUploading(false);
@@ -614,23 +509,7 @@ const ReportsPage = () => {
 
   return (
     <div className="flex h-screen overflow-hidden dark:bg-dark-secondary-500 rounded-xl">
-      <div className="w-1/3 border-r border-border overflow-y-auto p-4">
-        <div className="flex items-center justify-between mb-4">
-          <h2 className="text-xl font-semibold">Reports & Insights</h2>
-          <TooltipProvider>
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Button variant="outline" size="icon" className="h-8 w-8">
-                  <Filter className="h-4 w-4" />
-                </Button>
-              </TooltipTrigger>
-              <TooltipContent>
-                <p>Filter Reports</p>
-              </TooltipContent>
-            </Tooltip>
-          </TooltipProvider>
-        </div>
-
+      <div className="h-full w-1/3 border-r border-border overflow-y-auto p-4">
         <div className="space-y-3 mb-4">
           <div className="relative">
             <Search className="absolute left-2 top-2.5 h-5 w-5 text-muted-foreground" />

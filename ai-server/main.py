@@ -771,17 +771,15 @@ async def download_markdown(file_hash: str):
             
         _, _, analysis_result, _, _ = existing_data
         
-        # Create a temporary file
         with tempfile.NamedTemporaryFile(delete=False, suffix=".md") as tmp:
             tmp.write(analysis_result.encode('utf-8'))
             tmp_path = tmp.name
         
-        # Return the file as a response
         return FileResponse(
             tmp_path,
             media_type="text/markdown",
             filename="financial_analysis.md",
-            background=lambda: os.unlink(tmp_path)  # Clean up after sending
+            background=lambda: os.unlink(tmp_path)  
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -797,7 +795,6 @@ async def download_pdf(file_hash: str):
             
         file_name, _, analysis_result, _, _ = existing_data
         
-        # Create the generated_pdfs directory if it doesn't exist
         pdf_dir = os.path.join(os.getcwd(), "generated_pdfs")
         os.makedirs(pdf_dir, exist_ok=True)
         
@@ -812,8 +809,7 @@ async def download_pdf(file_hash: str):
             
             if not success:
                 raise HTTPException(status_code=500, detail=f"Error generating PDF: {error}")
-        
-        # Return the file as a response
+    
         return FileResponse(
             pdf_path,
             media_type="application/pdf",
