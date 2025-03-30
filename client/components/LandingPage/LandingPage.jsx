@@ -35,7 +35,7 @@ const Fin360LandingPage = () => {
   }, []);
 
   return (
-    <div className="flex flex-col min-h-screen bg-white">
+    <div className="flex flex-col h-screen bg-white">
       <Navbar isScrolled={isScrolled} />
       <section className="h-screen bg-black text-white flex items-center">
         <div className="container mx-auto px-4 flex flex-col md:flex-row items-center h-full py-8">
