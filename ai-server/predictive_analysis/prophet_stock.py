@@ -2,9 +2,7 @@ import yfinance as yf
 from prophet import Prophet
 import matplotlib.pyplot as plt
 import pandas as pd
-import json
-import os
-import base64
+import json, os, base64
 
 def fetch_stock_data(symbol, start_date, end_date):
     """

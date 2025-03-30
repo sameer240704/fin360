@@ -1,7 +1,6 @@
 import yfinance as yf
-import time
+import time, random
 from datetime import datetime, timedelta
-import random
 
 cache = {}
 CACHE_EXPIRY = timedelta(minutes=15)  

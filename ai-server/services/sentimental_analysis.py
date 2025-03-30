@@ -1,13 +1,12 @@
-import os
+import os, json
 from typing import Dict, List
-import json
 import PyPDF2
 import numpy as np
 import pandas as pd
 from dotenv import load_dotenv
 import google.generativeai as genai
 from PIL import Image as PILImage
-from fastapi import FastAPI, File, UploadFile, HTTPException
+from fastapi import HTTPException
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle

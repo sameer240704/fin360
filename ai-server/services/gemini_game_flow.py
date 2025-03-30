@@ -1,7 +1,5 @@
-import os
+import os, re, json
 import google.generativeai as genai
-import re
-import json
 from dotenv import load_dotenv
 
 load_dotenv()

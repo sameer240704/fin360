@@ -1,7 +1,6 @@
-import os
+import os, re
 from typing import Dict, List, Union
-
-from fastapi import FastAPI, File, UploadFile, HTTPException
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from google.generativeai import GenerativeModel
 import google.generativeai as genai
@@ -14,10 +13,6 @@ from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image as ReportLabImage
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib import colors
-from io import BytesIO
-import re
-from datetime import datetime
-import uuid  # For generating unique filenames
 
 app = FastAPI(title="AI Business Model Generator API")
 
