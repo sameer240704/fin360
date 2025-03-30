@@ -14,7 +14,6 @@ fitz
 reportlab
 faiss-cpu
 sentence-transformers
-pickle
 neo4j
 groq
 requests
