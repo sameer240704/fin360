@@ -2,7 +2,7 @@ fastapi
 uvicorn
 python-dotenv
 PyPDF2
-Jinja2Templates
+Jinja2
 python-multipart
 sqlite3
 hashlib
