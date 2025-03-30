@@ -389,7 +389,7 @@ const ReportsPage = () => {
     try {
       const file_hash = selectedReport.file_hash;
       const response = await fetch(
-        `${AI_SERVER_URL}/download/${file_hash}/pdf`,
+        `${AI_SERVER_URL}/download/pdf/${file_hash}`,
         {
           method: "GET",
         }
@@ -423,6 +423,29 @@ const ReportsPage = () => {
     const [tags, setTags] = useState("");
     const [file, setFile] = useState(null);
     const [isLoading, setIsLoading] = useState(false);
+    const [pagesToProcess, setPagesToProcess] = useState([]);
+    const [totalPages, setTotalPages] = useState(0);
+
+    const handleFileChange = async (e) => {
+      const selectedFile = e.target.files[0];
+      if (!selectedFile) return;
+
+      setFile(selectedFile);
+
+      try {
+        const arrayBuffer = await selectedFile.arrayBuffer();
+
+        const pdf = await pdfjsLib.getDocument(arrayBuffer).promise;
+        const numPages = pdf.numPages;
+        setTotalPages(numPages);
+
+        const allPages = Array.from({ length: numPages }, (_, i) => i);
+        setPagesToProcess(allPages);
+      } catch (error) {
+        console.error("Error reading PDF:", error);
+        toast.error("Error reading PDF file. Please try again.");
+      }
+    };
 
     const handleUpload = async () => {
       if (!file || !title) {
@@ -434,11 +457,10 @@ const ReportsPage = () => {
 
       const formData = new FormData();
       formData.append("file", file);
-      // formData.append("title", title);
-      // formData.append("tags", tags);
+      formData.append("pages_to_process", JSON.stringify(pagesToProcess));
 
       try {
-        const response = await fetch(`${AI_SERVER_URL}/analyze`, {
+        const response = await fetch(`${AI_SERVER_URL}/upload`, {
           method: "POST",
           body: formData,
         });
@@ -448,7 +470,6 @@ const ReportsPage = () => {
         }
 
         const result = await response.json();
-        console.log("Analysis Result:", result);
 
         const newReport = {
           id: Date.now(),
@@ -465,20 +486,32 @@ const ReportsPage = () => {
               notes: "Initial version",
             },
           ],
-          analysisResult: result.analysis_result,
-          extractedText: result.extracted_text,
-          file_hash: result.file_hash,
+          analysisResult: result?.data?.analysis_result,
+          extractedText: result?.data?.extracted_text,
+          file_hash: result?.data?.file_hash,
         };
+
+        console.log(newReport);
 
         setReports((prevReports) => [newReport, ...prevReports]);
         setSelectedReport(newReport);
         setIsUploading(false);
       } catch (error) {
         console.error("Error uploading file:", error);
-        alert("Error uploading file. Please try again.");
+        toast.error("Error uploading file. Please try again.");
       } finally {
         setIsLoading(false);
       }
+    };
+
+    const handlePageSelection = (pageNumber, isSelected) => {
+      setPagesToProcess((prev) => {
+        if (isSelected) {
+          return [...prev, pageNumber];
+        } else {
+          return prev.filter((p) => p !== pageNumber);
+        }
+      });
     };
 
     return (
@@ -488,7 +521,7 @@ const ReportsPage = () => {
             <PlusCircle className="mr-2 h-4 w-4" /> New Report
           </Button>
         </DialogTrigger>
-        <DialogContent className="sm:max-w-md">
+        <DialogContent className="sm:max-w-[600px]">
           <DialogHeader>
             <DialogTitle>Upload New Report</DialogTitle>
             <DialogDescription>
@@ -506,15 +539,6 @@ const ReportsPage = () => {
               />
             </div>
             <div className="grid gap-2">
-              <Label htmlFor="report-tags">Tags (comma separated)</Label>
-              <Input
-                id="report-tags"
-                placeholder="financial, quarterly, etc."
-                value={tags}
-                onChange={(e) => setTags(e.target.value)}
-              />
-            </div>
-            <div className="grid gap-2">
               <Label htmlFor="report-file">PDF Document</Label>
               <div className="border-2 border-dashed rounded-md p-6 text-center cursor-pointer hover:bg-muted/50 transition-colors">
                 <Upload className="h-8 w-8 mx-auto mb-2 text-muted-foreground" />
@@ -529,10 +553,35 @@ const ReportsPage = () => {
                   type="file"
                   accept=".pdf"
                   className="mt-4"
-                  onChange={(e) => setFile(e.target.files[0])}
+                  onChange={handleFileChange}
                 />
               </div>
             </div>
+
+            {totalPages > 0 && (
+              <div className="grid gap-2">
+                <Label>
+                  Select Pages to Process ({pagesToProcess.length} of{" "}
+                  {totalPages} selected)
+                </Label>
+                <div className="flex flex-wrap gap-2">
+                  {Array.from({ length: totalPages }, (_, i) => (
+                    <Button
+                      key={i}
+                      variant={
+                        pagesToProcess.includes(i) ? "default" : "outline"
+                      }
+                      size="sm"
+                      onClick={() =>
+                        handlePageSelection(i, !pagesToProcess.includes(i))
+                      }
+                    >
+                      Page {i + 1}
+                    </Button>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setIsUploading(false)}>
@@ -866,7 +915,7 @@ const ReportsPage = () => {
                       onMouseDown={isSelecting ? handleMouseDown : undefined}
                     >
                       <Document
-                        file={`${AI_SERVER_URL}/download/${selectedReport.file_hash}/pdf`}
+                        file={`${AI_SERVER_URL}/download/pdf/${selectedReport.file_hash}`}
                         onLoadSuccess={onDocumentLoadSuccess}
                       >
                         <Page pageNumber={pageNumber} scale={zoomLevel / 100} />

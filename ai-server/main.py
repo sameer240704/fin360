@@ -3,27 +3,23 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from PyPDF2 import PdfReader
+from fastapi.templating import Jinja2Templates
 from typing import List, Dict, Optional
-import io
-import os
-import uuid
-import base64
-import tempfile
-from typing import List, Optional
+import uuid, json, os, io, base64, tempfile, sqlite3, hashlib, re
 from dotenv import load_dotenv
+import stocks_data
 from services.gemini_game_flow import get_gemini_response
 from services.stocks_data import fetch_multiple_stocks
 from python_types.types import StockItem, ProphetRequest
-from services.reports import get_file_hash, extract_text_with_mistral, analyze_with_gemini, chat_with_gemini_simple, chat_with_gemini_faiss, split_into_chunks, build_faiss_index
+from services.reports import convert_markdown_to_pdf, load_faiss_index, create_summary_tables, save_to_db, extract_tables_from_text, get_existing_data, extract_text_with_mistral, analyze_with_gemini, chat_with_gemini_simple, chat_with_gemini_faiss, split_into_chunks, build_faiss_index
 from predictive_analysis import prophet_stock
-import stocks_data
 from services.chatbot import search_companies_by_query, SearchCompaniesRequest, initialize_graph_database, clear_chat, display_chat, generate_response, add_to_chat, genai, state, init_state, get_pdf_files_from_folders, ProcessDocumentsRequest, generate_database_id, get_existing_faiss_indexes, VectorDatabase, extract_text_with_links, ChatRequest
 from services.business_model import extract_text, generate_business_models, generate_pdf
 from services.sentimental_analysis import extract_text_from_pdf, analyze_sentiment, create_pdf_report
 
 load_dotenv()
 
-app = FastAPI()
+app = FastAPI(title="Fin360")
 
 app.add_middleware(
     CORSMiddleware,
@@ -34,6 +30,10 @@ app.add_middleware(
 )
 
 app.mount("/generated_pdfs", StaticFiles(directory="generated_pdfs"), name="generated_pdfs")
+templates = Jinja2Templates(directory="templates")
+
+DB_NAME = os.getenv("DB_NAME")
+DATABASE_DIR = os.getenv("DATABASE_DIR")
 
 analysis_cache: Dict[str, dict] = {}  # {file_hash: {file_name, extracted_text, analysis_result, faiss_index, embeddings}}
 chat_histories: Dict[str, List[dict]] = {}  # {file_hash: [{role, content, image (optional)}]}
@@ -550,3 +550,274 @@ async def download_file(filename: str):
         filename=filename,
         media_type="application/pdf"
     )
+
+### New routes 
+@app.post("/upload")
+async def upload_file(
+    file: UploadFile = File(...),
+    pages_to_process: str = Form("[]"),
+):
+    """Endpoint to upload and analyze a financial document."""
+    try:
+        # Read file content once
+        file_content = await file.read()
+        file_hash = hashlib.sha256(file_content).hexdigest()
+
+        # Check for existing data
+        existing_data = get_existing_data(file_hash)
+        if existing_data:
+            file_name, extracted_text, analysis_result, extracted_tables, faiss_index_path = existing_data
+            return JSONResponse(content={
+                "status": "success",
+                "message": f"Found existing analysis for '{file_name}' in the database!",
+                "data": {
+                    "file_name": file_name,
+                    "extracted_text": extracted_text,
+                    "analysis_result": analysis_result,
+                    "extracted_tables": json.loads(extracted_tables) if extracted_tables else [],
+                    "faiss_index_path": faiss_index_path
+                }
+            })
+
+        # Create a temporary file for processing
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
+            tmp_file.write(file_content)
+            tmp_path = tmp_file.name
+
+
+        try:
+            # Process PDF
+            with open(tmp_path, "rb") as pdf_file:
+                pdf_reader = PdfReader(pdf_file)
+                num_pages = len(pdf_reader.pages)
+                
+                pages = json.loads(pages_to_process)
+                if not pages:
+                    pages = list(range(num_pages))
+                else:
+                    invalid_pages = [p for p in pages if p >= num_pages or p < 0]
+                    if invalid_pages:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"Invalid page numbers: {invalid_pages}. Document has {num_pages} pages."
+                        )
+
+                # Process with Mistral
+                pdf_file.seek(0)  # Reset file pointer
+                ocr_result = extract_text_with_mistral(pdf_file, pages)
+                
+                if not ocr_result or "pages" not in ocr_result:
+                    raise HTTPException(
+                        status_code=500,
+                        detail="Failed to extract text from PDF or invalid response format"
+                    )
+
+                # Process text content
+                all_text = ""
+                for page in ocr_result.get("pages", []):
+                    page_num = page.get("page_num", 0)
+                    page_content = page.get("markdown", "")
+                    if page_content:
+                        all_text += f"\n**Page {page_num}**\n{page_content}\n\n"
+
+                if not all_text.strip():
+                    raise HTTPException(
+                        status_code=500,
+                        detail="No text content could be extracted from the PDF"
+                    )
+
+                # Extract tables
+                tables = extract_tables_from_text(all_text)
+                
+                # Analyze with Gemini
+                analysis = analyze_with_gemini(all_text, pages)
+                summary_tables = create_summary_tables(analysis)
+                combined_analysis = f"{analysis}\n\n## SUMMARY TABLES\n\n{summary_tables}"
+                
+                # Build FAISS index
+                context_chunks = split_into_chunks(all_text)
+                _, _, faiss_index_path = build_faiss_index(context_chunks, file_hash)
+                
+                # Save to database
+                save_to_db(
+                    file_hash, 
+                    file.filename, 
+                    all_text, 
+                    combined_analysis, 
+                    json.dumps(tables), 
+                    faiss_index_path
+                )
+                
+                return JSONResponse(content={
+                    "status": "success",
+                    "message": "Analysis completed successfully",
+                    "data": {
+                        "file_name": file.filename,
+                        "extracted_text": all_text,
+                        "analysis_result": combined_analysis,
+                        "extracted_tables": tables,
+                        "faiss_index_path": faiss_index_path,
+                        "file_hash": file_hash
+                    }
+                })
+        
+        finally:
+            # Clean up temporary file
+            try:
+                os.unlink(tmp_path)
+            except Exception as e:
+                print(f"Warning: Failed to delete temp file {tmp_path}: {str(e)}")
+
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="Invalid pages_to_process format")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}")
+
+@app.get("/documents/")
+async def list_documents():
+    """List all analyzed documents available in the database."""
+    try:
+        conn = sqlite3.connect(DB_NAME)
+        c = conn.cursor()
+        c.execute('SELECT file_hash, file_name, timestamp FROM financial_data ORDER BY timestamp DESC')
+        results = c.fetchall()
+        conn.close()
+        
+        documents = []
+        for row in results:
+            documents.append({
+                "file_hash": row[0],
+                "file_name": row[1],
+                "timestamp": row[2],
+                "faiss_index_path": os.path.join(DATABASE_DIR, f"faiss_{row[0]}.index")
+            })
+            
+        return JSONResponse(content={
+            "status": "success",
+            "documents": documents
+        })
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/document/{file_hash}")
+async def get_document(file_hash: str):
+    """Get details of a specific document by its hash."""
+    try:
+        existing_data = get_existing_data(file_hash)
+        if not existing_data:
+            raise HTTPException(status_code=404, detail="Document not found")
+            
+        file_name, extracted_text, analysis_result, extracted_tables, faiss_index_path = existing_data
+        
+        return JSONResponse(content={
+            "status": "success",
+            "document": {
+                "file_name": file_name,
+                "extracted_text": extracted_text,
+                "analysis_result": analysis_result,
+                "extracted_tables": json.loads(extracted_tables) if extracted_tables else [],
+                "faiss_index_path": faiss_index_path
+            }
+        })
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/chat/{file_hash}")
+async def chat_with_document(
+    file_hash: str,
+    chat_request: ChatRequest
+):
+    """Chat with a specific document using either simple or FAISS-enhanced mode."""
+    try:
+        existing_data = get_existing_data(file_hash)
+        if not existing_data:
+            raise HTTPException(status_code=404, detail="Document not found")
+            
+        file_name, extracted_text, analysis_result, extracted_tables, faiss_index_path = existing_data
+        
+        # Choose context source
+        context_text = analysis_result if chat_request.context_source == "Analysis Result" else extracted_text
+        
+        if chat_request.chat_mode == "Simple (Full Context)":
+            response = chat_with_gemini_simple(context_text, chat_request.query)
+        else:
+            # FAISS mode
+            context_chunks = split_into_chunks(context_text)
+            index = load_faiss_index(faiss_index_path)
+            if index is None:
+                # If index doesn't exist, rebuild it
+                index, _, new_faiss_index_path = build_faiss_index(context_chunks, file_hash)
+                save_to_db(file_hash, file_name, extracted_text, analysis_result, extracted_tables, new_faiss_index_path)
+                
+            response = chat_with_gemini_faiss(context_chunks, index, context_text, chat_request.query)
+            
+        return JSONResponse(content={
+            "status": "success",
+            "response": response
+        })
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/download/markdown/{file_hash}")
+async def download_markdown(file_hash: str):
+    """Download the analysis result as a markdown file."""
+    try:
+        existing_data = get_existing_data(file_hash)
+        if not existing_data:
+            raise HTTPException(status_code=404, detail="Document not found")
+            
+        _, _, analysis_result, _, _ = existing_data
+        
+        # Create a temporary file
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".md") as tmp:
+            tmp.write(analysis_result.encode('utf-8'))
+            tmp_path = tmp.name
+        
+        # Return the file as a response
+        return FileResponse(
+            tmp_path,
+            media_type="text/markdown",
+            filename="financial_analysis.md",
+            background=lambda: os.unlink(tmp_path)  # Clean up after sending
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/download/pdf/{file_hash}")
+async def download_pdf(file_hash: str):
+    """Download the analysis result as a PDF file."""
+    try:
+        existing_data = get_existing_data(file_hash)
+        if not existing_data:
+            raise HTTPException(status_code=404, detail="Document not found")
+            
+        file_name, _, analysis_result, _, _ = existing_data
+        
+        # Create the generated_pdfs directory if it doesn't exist
+        pdf_dir = os.path.join(os.getcwd(), "generated_pdfs")
+        os.makedirs(pdf_dir, exist_ok=True)
+        
+        base_filename = f"{file_hash}_{file_name.replace(' ', '_')}"
+        base_filename = re.sub(r'\.\w+$', '', base_filename) + ".pdf"
+        safe_filename = re.sub(r'[^\w\-\.]', '_', base_filename)
+        
+        pdf_path = os.path.join(pdf_dir, safe_filename)
+        
+        if not os.path.exists(pdf_path):
+            success, error = convert_markdown_to_pdf(analysis_result, pdf_path)
+            
+            if not success:
+                raise HTTPException(status_code=500, detail=f"Error generating PDF: {error}")
+        
+        # Return the file as a response
+        return FileResponse(
+            pdf_path,
+            media_type="application/pdf",
+            filename=safe_filename
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

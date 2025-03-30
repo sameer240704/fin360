@@ -14,15 +14,15 @@ export const sidebarData = [
     {
         category: "market",
         items: [
-            { title: "news", route: "/user/news", icon: Newspaper },
-            { title: "reports", route: "/user/reports", icon: ClipboardMinus },
-            { title: "flow", route: "/user/flow", icon: Workflow },
+            { title: "news", route: "/market/news", icon: Newspaper },
+            { title: "reports", route: "/market/reports", icon: ClipboardMinus },
+            { title: "flow", route: "/market/flow", icon: Workflow },
         ],
     },
     {
         category: "Communication",
         items: [
-            { title: "chatbot", route: "/chatbot", icon: BotMessageSquare },
+            { title: "chatbot", route: "/communication/chatbot", icon: BotMessageSquare },
         ],
     },
     {
