@@ -4,7 +4,6 @@ python-dotenv
 PyPDF2
 Jinja2
 python-multipart
-sqlite3
 hashlib
 re
 uuid
