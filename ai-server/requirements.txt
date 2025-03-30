@@ -24,3 +24,5 @@ seaborn
 wordcloud
 prophet
 weasyprint
+plotly
+frontend

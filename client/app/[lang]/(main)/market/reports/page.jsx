@@ -82,7 +82,7 @@ const ReportsPage = () => {
   const [sortBy, setSortBy] = useState("date");
   const [commentText, setCommentText] = useState("");
   const [activeTab, setActiveTab] = useState("view");
-  const [zoomLevel, setZoomLevel] = useState(100);
+  const [zoomLevel, setZoomLevel] = useState(160);
   const [numPages, setNumPages] = useState(null);
   const [pageNumber, setPageNumber] = useState(1);
   const pdfContainerRef = useRef(null);
