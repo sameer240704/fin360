@@ -459,7 +459,7 @@ const ReportsPage = () => {
                   Select Pages to Process ({pagesToProcess.length} of{" "}
                   {totalPages} selected)
                 </Label>
-                <div className="flex flex-wrap gap-2">
+                <div className="max-h-72 flex flex-wrap gap-2 overflow-y-scroll">
                   {Array.from({ length: totalPages }, (_, i) => (
                     <Button
                       key={i}
