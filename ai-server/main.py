@@ -647,6 +647,8 @@ async def upload_file(
                     json.dumps(tables), 
                     faiss_index_path
                 )
+
+                print(file_hash)
                 
                 return JSONResponse(content={
                     "status": "success",
