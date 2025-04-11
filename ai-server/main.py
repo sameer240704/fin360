@@ -11,9 +11,9 @@ import stocks_data
 from services.gemini_game_flow import get_gemini_response
 from services.stocks_data import fetch_multiple_stocks
 from python_types.types import StockItem, ProphetRequest
-from services.reports import convert_markdown_to_pdf, load_faiss_index, create_summary_tables, save_to_db, extract_tables_from_text, get_existing_data, extract_text_with_mistral, analyze_with_gemini, chat_with_gemini_simple, chat_with_gemini_faiss, split_into_chunks, build_faiss_index
+from services.reports import convert_markdown_to_pdf, create_summary_tables, save_to_db, extract_tables_from_text, get_existing_data, extract_text_with_mistral, analyze_with_gemini, chat_with_gemini_simple
 from predictive_analysis import prophet_stock
-from services.chatbot import search_companies_by_query, SearchCompaniesRequest, initialize_graph_database, clear_chat, display_chat, generate_response, add_to_chat, genai, state, init_state, get_pdf_files_from_folders, ProcessDocumentsRequest, generate_database_id, get_existing_faiss_indexes, VectorDatabase, extract_text_with_links, ChatRequest
+from services.chatbot import search_companies_by_query, SearchCompaniesRequest, initialize_graph_database, clear_chat, display_chat, generate_response, add_to_chat, genai, state, init_state, get_pdf_files_from_folders, ProcessDocumentsRequest, generate_database_id, extract_text_with_links, ChatRequest
 from services.business_model import extract_text, generate_business_models, generate_pdf
 from services.sentimental_analysis import extract_text_from_pdf, analyze_sentiment, create_pdf_report
 
@@ -35,7 +35,7 @@ templates = Jinja2Templates(directory="templates")
 DB_NAME = os.getenv("DB_NAME")
 DATABASE_DIR = os.getenv("DATABASE_DIR")
 
-analysis_cache: Dict[str, dict] = {}  # {file_hash: {file_name, extracted_text, analysis_result, faiss_index, embeddings}}
+analysis_cache: Dict[str, dict] = {}  # {file_hash: {file_name, extracted_text, analysis_result}}
 chat_histories: Dict[str, List[dict]] = {}  # {file_hash: [{role, content, image (optional)}]}
 
 @app.post("/ai-financial-path")
@@ -122,10 +122,9 @@ async def analyze_file(file: UploadFile = File(...), pages: Optional[str] = Form
     """Process and analyze uploaded PDF file"""
     if not file.filename.endswith('.pdf'):
         raise HTTPException(status_code=400, detail="Only PDF files are supported")
-    
+   
     file_content = await file.read()
-    file_hash = get_file_hash(file_content)
-
+    file_hash = hashlib.sha256(file_content).hexdigest()
     if file_hash in analysis_cache:
         return {
             "file_hash": file_hash,
@@ -133,51 +132,44 @@ async def analyze_file(file: UploadFile = File(...), pages: Optional[str] = Form
             "extracted_text": analysis_cache[file_hash]["extracted_text"],
             "analysis_result": analysis_cache[file_hash]["analysis_result"]
         }
-    
+   
     try:
         with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as temp_file:
             temp_file.write(file_content)
             temp_file_path = temp_file.name
-
         pdf_reader = PdfReader(io.BytesIO(file_content))
         num_pages = len(pdf_reader.pages)
-        
+       
         pages_to_process = [int(p) for p in pages.split(',')] if pages else list(range(num_pages))
         if any(p >= num_pages or p < 0 for p in pages_to_process):
             raise HTTPException(status_code=400, detail="Invalid page numbers")
-    
+   
         ocr_result = extract_text_with_mistral(file_content, file.filename, pages_to_process)
         if not ocr_result:
             raise HTTPException(status_code=500, detail="Failed to extract text from PDF")
-        
+       
         all_text = ""
         for page in ocr_result.get("pages", []):
             all_text += page.get("markdown", "") + "\n\n"
-        
+       
         analysis = analyze_with_gemini(all_text)
-        
-        context_chunks = split_into_chunks(all_text)
-        faiss_index, embeddings = build_faiss_index(context_chunks)
-        
+       
         analysis_cache[file_hash] = {
             "file_name": file.filename,
             "extracted_text": all_text,
             "analysis_result": analysis,
-            "faiss_index": faiss_index,
-            "embeddings": embeddings,
-            "context_chunks": context_chunks,
             "file_path": temp_file_path
         }
-        
+       
         chat_histories[file_hash] = []
-        
+       
         return {
             "file_hash": file_hash,
             "file_name": file.filename,
             "extracted_text": all_text,
             "analysis_result": analysis
         }
-    
+   
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error processing PDF: {str(e)}")
     
@@ -217,10 +209,9 @@ async def chat(
     file_hash: str = Form(...),
     context_type: str = Form(...),
     query: str = Form(...),
-    use_faiss: str = Form("false"),  
     image: Optional[UploadFile] = File(None)
 ):
-    """Chat with the analyzed document, with or without FAISS"""
+    """Chat with the analyzed document"""
     if file_hash not in analysis_cache:
         raise HTTPException(status_code=404, detail="Document not found")
     
@@ -232,20 +223,7 @@ async def chat(
 
     image_bytes = await image.read() if image else None
     
-    use_faiss_bool = use_faiss.lower() == "true"
-    
-    if use_faiss_bool:
-        if not context_data.get("faiss_index") or not context_data.get("context_chunks"):
-            raise HTTPException(status_code=400, detail="FAISS index not available for this document")
-        response = chat_with_gemini_faiss(
-            context_data["context_chunks"],
-            context_data["faiss_index"],
-            context,
-            query,
-            image_bytes
-        )
-    else:
-        response = chat_with_gemini_simple(context, query, image_bytes)
+    response = chat_with_gemini_simple(context, query, image_bytes)
 
     chat_entry = {"role": "user", "content": query}
     if image:
@@ -324,80 +302,43 @@ async def process_documents(
 
     db_id = generate_database_id(combined_pdfs)
 
-    if request.action == "Use Existing FAISS Index":
-        existing_indexes = get_existing_faiss_indexes()
-        if not existing_indexes:
-            raise HTTPException(status_code=404, detail="No existing FAISS indexes found")
-        if db_id not in existing_indexes:
-            raise HTTPException(status_code=404, detail=f"FAISS index {db_id} not found")
-        vector_db = VectorDatabase.load(db_id, "embedding-001")
-        if vector_db:
-            state['vector_db'] = vector_db
-            state['db_id'] = db_id
-            processed_files = set(meta.get("source", "").split(" (")[0] for meta in vector_db.document_metadata if "source" in meta)
-            state['processed_files'] = list(processed_files)
-            return {"message": f"Loaded FAISS index: {db_id}"}
-        else:
-            raise HTTPException(status_code=500, detail=f"Failed to load FAISS index: {db_id}")
+    if request.action == "Process New Documents":
+        total_files = len(combined_pdfs)
+        processed, skipped = 0, 0
 
-    elif request.action == "Process New Documents":
-        if request.force_reindex or db_id != state['db_id']:
-            vector_db = VectorDatabase("embedding-001")
-            total_files = len(combined_pdfs)
-            processed, skipped = 0, 0
+        for pdf in default_pdfs:
+            print(f"Processing {processed+1}/{total_files}: {pdf['name']}")
+            pdf_text = extract_text_with_links(pdf["path"])
+            if pdf_text.strip():
+                print(f"Processed {pdf['name']}")
+            else:
+                if request.skip_empty_pdfs:
+                    print(f"Skipping {pdf['name']} - no text")
+                    skipped += 1
+                else:
+                    print(f"Processed {pdf['name']} - no text")
+            processed += 1
 
-            for pdf in default_pdfs:
-                print(f"Processing {processed+1}/{total_files}: {pdf['name']}")
-                pdf_text = extract_text_with_links(pdf["path"])
+        if uploaded_files:
+            for file in uploaded_files:
+                print(f"Processing {processed+1}/{total_files}: {file.filename}")
+                pdf_text = extract_text_with_links(file.file)
                 if pdf_text.strip():
-                    metadata = {"source": f"{pdf['name']} (Department: {pdf['department']})", "type": "pdf"}
-                    chunks_added = vector_db.add_document(pdf_text, chunk_size=request.chunk_size, overlap=request.chunk_overlap, metadata=metadata)
-                    print(f"Added {chunks_added} chunks from {pdf['name']}")
+                    print(f"Processed {file.filename}")
                 else:
                     if request.skip_empty_pdfs:
-                        print(f"Skipping {pdf['name']} - no text")
+                        print(f"Skipping {file.filename} - no text")
                         skipped += 1
                     else:
-                        metadata = {"source": f"{pdf['name']} (Department: {pdf['department']})", "type": "pdf"}
-                        vector_db.add_document("No text.", chunk_size=request.chunk_size, overlap=0, metadata=metadata)
+                        print(f"Processed {file.filename} - no text")
                 processed += 1
 
-            if uploaded_files:
-                for file in uploaded_files:
-                    print(f"Processing {processed+1}/{total_files}: {file.filename}")
-                    pdf_text = extract_text_with_links(file.file)
-                    if pdf_text.strip():
-                        metadata = {"source": f"{file.filename} (Uploaded)", "type": "pdf"}
-                        chunks_added = vector_db.add_document(pdf_text, chunk_size=request.chunk_size, overlap=request.chunk_overlap, metadata=metadata)
-                        print(f"Added {chunks_added} chunks from {file.filename}")
-                    else:
-                        if request.skip_empty_pdfs:
-                            print(f"Skipping {file.filename} - no text")
-                            skipped += 1
-                        else:
-                            metadata = {"source": f"{file.filename} (Uploaded)", "type": "pdf"}
-                            vector_db.add_document("No text.", chunk_size=request.chunk_size, overlap=0, metadata=metadata)
-                    processed += 1
-
-            vector_db.save(db_id)
-            state['vector_db'] = vector_db
-            state['db_id'] = db_id
-            state['processed_files'] = [pdf["name"] for pdf in default_pdfs] + ([file.filename for file in uploaded_files] if uploaded_files else [])
-            return {"message": f"Processed {total_files - skipped} documents (skipped {skipped}) with ID: {db_id}"}
-        else:
-            vector_db = VectorDatabase.load(db_id, "embedding-001")
-            if vector_db:
-                state['vector_db'] = vector_db
-                state['db_id'] = db_id
-                return {"message": f"Loaded existing database with ID: {db_id}"}
-            else:
-                raise HTTPException(status_code=500, detail=f"Failed to load FAISS index: {db_id}")
+        state['db_id'] = db_id
+        state['processed_files'] = [pdf["name"] for pdf in default_pdfs] + ([file.filename for file in uploaded_files] if uploaded_files else [])
+        return {"message": f"Processed {total_files - skipped} documents (skipped {skipped}) with ID: {db_id}"}
 
 @app.post("/chatbot")
 async def chat(request: ChatRequest):
-    # if not state['vector_db'] and not state['graph_initialized']:
-    #     raise HTTPException(status_code=400, detail="Please process documents or initialize the graph database first")
-
     model_options = request.model_options
     model_instance = genai.GenerativeModel(
         model_name=model_options.model_name if model_options.model_name.startswith("gemini") else "gemini-1.5-flash",
@@ -411,7 +352,7 @@ async def chat(request: ChatRequest):
     add_to_chat("user", request.prompt)
     response = generate_response(
         request.prompt,
-        state['vector_db'],
+        None,
         model_instance,
         model_options.model_name,
         model_options.temperature,
@@ -446,12 +387,9 @@ async def search_companies(request: SearchCompaniesRequest):
 @app.get("/settings")
 async def get_settings():
     settings = {}
-    if state['vector_db']:
-        settings["vector_db"] = {
-            "db_id": state['db_id'],
-            "chunk_count": len(state['vector_db'].document_chunks),
-            "processed_files": state['processed_files']
-        }
+    if state['db_id']:
+        settings["db_id"] = state['db_id']
+        settings["processed_files"] = state['processed_files']
     if state['graph_initialized']:
         settings["graph_db"] = {"status": "Initialized"}
     return {"settings": settings}
@@ -551,7 +489,6 @@ async def download_file(filename: str):
         media_type="application/pdf"
     )
 
-### New routes 
 @app.post("/upload")
 async def upload_file(
     file: UploadFile = File(...),
@@ -566,7 +503,7 @@ async def upload_file(
         # Check for existing data
         existing_data = get_existing_data(file_hash)
         if existing_data:
-            file_name, extracted_text, analysis_result, extracted_tables, faiss_index_path = existing_data
+            file_name, extracted_text, analysis_result, extracted_tables, _ = existing_data
             return JSONResponse(content={
                 "status": "success",
                 "message": f"Found existing analysis for '{file_name}' in the database!",
@@ -575,7 +512,7 @@ async def upload_file(
                     "extracted_text": extracted_text,
                     "analysis_result": analysis_result,
                     "extracted_tables": json.loads(extracted_tables) if extracted_tables else [],
-                    "faiss_index_path": faiss_index_path
+                    "file_hash": file_hash
                 }
             })
 
@@ -583,7 +520,6 @@ async def upload_file(
         with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
             tmp_file.write(file_content)
             tmp_path = tmp_file.name
-
 
         try:
             # Process PDF
@@ -634,10 +570,6 @@ async def upload_file(
                 summary_tables = create_summary_tables(analysis)
                 combined_analysis = f"{analysis}\n\n## SUMMARY TABLES\n\n{summary_tables}"
                 
-                # Build FAISS index
-                context_chunks = split_into_chunks(all_text)
-                _, _, faiss_index_path = build_faiss_index(context_chunks, file_hash)
-                
                 # Save to database
                 save_to_db(
                     file_hash, 
@@ -645,11 +577,8 @@ async def upload_file(
                     all_text, 
                     combined_analysis, 
                     json.dumps(tables), 
-                    faiss_index_path
                 )
 
-                print(file_hash)
-                
                 return JSONResponse(content={
                     "status": "success",
                     "message": "Analysis completed successfully",
@@ -658,7 +587,6 @@ async def upload_file(
                         "extracted_text": all_text,
                         "analysis_result": combined_analysis,
                         "extracted_tables": tables,
-                        "faiss_index_path": faiss_index_path,
                         "file_hash": file_hash
                     }
                 })
@@ -692,8 +620,7 @@ async def list_documents():
             documents.append({
                 "file_hash": row[0],
                 "file_name": row[1],
-                "timestamp": row[2],
-                "faiss_index_path": os.path.join(DATABASE_DIR, f"faiss_{row[0]}.index")
+                "timestamp": row[2]
             })
             
         return JSONResponse(content={
@@ -711,7 +638,7 @@ async def get_document(file_hash: str):
         if not existing_data:
             raise HTTPException(status_code=404, detail="Document not found")
             
-        file_name, extracted_text, analysis_result, extracted_tables, faiss_index_path = existing_data
+        file_name, extracted_text, analysis_result, extracted_tables, _ = existing_data
         
         return JSONResponse(content={
             "status": "success",
@@ -719,8 +646,7 @@ async def get_document(file_hash: str):
                 "file_name": file_name,
                 "extracted_text": extracted_text,
                 "analysis_result": analysis_result,
-                "extracted_tables": json.loads(extracted_tables) if extracted_tables else [],
-                "faiss_index_path": faiss_index_path
+                "extracted_tables": json.loads(extracted_tables) if extracted_tables else []
             }
         })
     except Exception as e:
@@ -731,29 +657,18 @@ async def chat_with_document(
     file_hash: str,
     chat_request: ChatRequest
 ):
-    """Chat with a specific document using either simple or FAISS-enhanced mode."""
+    """Chat with a specific document using simple mode."""
     try:
         existing_data = get_existing_data(file_hash)
         if not existing_data:
             raise HTTPException(status_code=404, detail="Document not found")
             
-        file_name, extracted_text, analysis_result, extracted_tables, faiss_index_path = existing_data
+        file_name, extracted_text, analysis_result, extracted_tables, _ = existing_data
         
         # Choose context source
         context_text = analysis_result if chat_request.context_source == "Analysis Result" else extracted_text
         
-        if chat_request.chat_mode == "Simple (Full Context)":
-            response = chat_with_gemini_simple(context_text, chat_request.query)
-        else:
-            # FAISS mode
-            context_chunks = split_into_chunks(context_text)
-            index = load_faiss_index(faiss_index_path)
-            if index is None:
-                # If index doesn't exist, rebuild it
-                index, _, new_faiss_index_path = build_faiss_index(context_chunks, file_hash)
-                save_to_db(file_hash, file_name, extracted_text, analysis_result, extracted_tables, new_faiss_index_path)
-                
-            response = chat_with_gemini_faiss(context_chunks, index, context_text, chat_request.query)
+        response = chat_with_gemini_simple(context_text, chat_request.query)
             
         return JSONResponse(content={
             "status": "success",
@@ -785,7 +700,6 @@ async def download_markdown(file_hash: str):
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
 
 @app.get("/download/pdf/{file_hash}")
 async def download_pdf(file_hash: str):

@@ -4,9 +4,6 @@ import fitz
 import time
 import re
 import glob
-import numpy as np
-import faiss
-import pickle
 import hashlib
 from datetime import datetime, timedelta
 from neo4j import GraphDatabase
@@ -23,7 +20,6 @@ load_dotenv()
 
 path2 = '/home/sameer42/Desktop/Hackathons/d2k3-bournvita-smugglers/ai-server' 
 annual_reports = 'Annual Reports'
-FAISS_INDEX_DIR = 'faiss_indexes'
 
 genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
 
@@ -41,8 +37,6 @@ driver = GraphDatabase.driver(
 
 groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
-os.makedirs(FAISS_INDEX_DIR, exist_ok=True)
-
 SECTORS = {
     "Technology": ["AAPL", "MSFT", "GOOGL", "META"],
     "Healthcare": ["JNJ", "PFE", "UNH", "ABBV"],
@@ -58,7 +52,6 @@ FINANCIAL_METRICS = [
 
 state = {
     "chat_history": [],
-    "vector_db": None,
     "db_id": None,
     "processed_files": [],
     "messages": [
@@ -68,105 +61,6 @@ state = {
     "financial_cache": {},
     "graph_initialized": False
 }
-
-# FAISS Vector Database Class
-class VectorDatabase:
-    def __init__(self, model, dimension=768):
-        self.model = model
-        self.dimension = dimension
-        self.index = faiss.IndexFlatL2(dimension)
-        self.document_chunks = []
-        self.document_metadata = []
-
-    def _get_embedding(self, text):
-        try:
-            embedding_result = genai.embed_content(
-                model="models/embedding-001",
-                content=text,
-                task_type="retrieval_document"
-            )
-            return np.array(embedding_result["embedding"]).astype('float32')
-        except Exception as e:
-            print(f"Error generating embedding: {e}")
-            try:
-                from sentence_transformers import SentenceTransformer
-                print("Falling back to sentence-transformers")
-                if not hasattr(self, 'st_model'):
-                    self.st_model = SentenceTransformer('all-MiniLM-L6-v2')
-                embedding = self.st_model.encode(text, normalize_embeddings=True)
-                return embedding.astype('float32')
-            except:
-                return np.zeros(self.dimension).astype('float32')
-
-    def add_document(self, document_text, chunk_size=1000, overlap=200, metadata=None):
-        chunks = []
-        for i in range(0, len(document_text), chunk_size - overlap):
-            chunk = document_text[i:i + chunk_size]
-            if len(chunk) < 100:
-                continue
-            chunks.append(chunk)
-
-        embeddings = []
-        for i, chunk in enumerate(chunks):
-            print(f"Processing chunk {i+1}/{len(chunks)}...")
-            embedding = self._get_embedding(chunk)
-            embeddings.append(embedding)
-            chunk_metadata = metadata.copy() if metadata else {}
-            chunk_metadata["chunk_index"] = i
-            chunk_metadata["text"] = chunk
-            self.document_chunks.append(chunk)
-            self.document_metadata.append(chunk_metadata)
-
-        if embeddings:
-            embeddings_array = np.array(embeddings).astype('float32')
-            self.index.add(embeddings_array)
-
-        return len(chunks)
-
-    def search(self, query, top_k=5):
-        query_embedding = self._get_embedding(query)
-        query_embedding = np.array([query_embedding]).astype('float32')
-
-        D, I = self.index.search(query_embedding, top_k)
-
-        results = []
-        for i, idx in enumerate(I[0]):
-            if idx < len(self.document_chunks) and idx >= 0:
-                results.append({
-                    "text": self.document_chunks[idx],
-                    "metadata": self.document_metadata[idx],
-                    "score": float(D[0][i])
-                })
-        return results
-
-    def save(self, filename):
-        index_file = os.path.join(FAISS_INDEX_DIR, f"{filename}.index")
-        faiss.write_index(self.index, index_file)
-        data_file = os.path.join(FAISS_INDEX_DIR, f"{filename}.pkl")
-        with open(data_file, 'wb') as f:
-            pickle.dump({
-                'chunks': self.document_chunks,
-                'metadata': self.document_metadata,
-                'dimension': self.dimension
-            }, f)
-
-    @classmethod
-    def load(cls, filename, model):
-        index_file = os.path.join(FAISS_INDEX_DIR, f"{filename}.index")
-        data_file = os.path.join(FAISS_INDEX_DIR, f"{filename}.pkl")
-
-        if not os.path.exists(index_file) or not os.path.exists(data_file):
-            return None
-
-        index = faiss.read_index(index_file)
-        with open(data_file, 'rb') as f:
-            data = pickle.load(f)
-
-        instance = cls(model, data['dimension'])
-        instance.index = index
-        instance.document_chunks = data['chunks']
-        instance.document_metadata = data['metadata']
-        return instance
 
 # Neo4j Graph Database Management
 def create_graph_schema():
@@ -464,16 +358,10 @@ def generate_database_id(pdf_files):
     hasher.update(today.encode())
     return hasher.hexdigest()
 
-def get_existing_faiss_indexes():
-    index_files = glob.glob(os.path.join(FAISS_INDEX_DIR, "*.index"))
-    return [os.path.splitext(os.path.basename(f))[0] for f in index_files]
-
 # Session state initialization
 def init_state():
     if not state['chat_history']:
         state['chat_history'] = []
-    if not state['vector_db']:
-        state['vector_db'] = None
     if not state['db_id']:
         state['db_id'] = None
     if not state['processed_files']:
@@ -586,26 +474,6 @@ def prepare_system_context(user_message):
 
     return base_context + conversation_history
 
-def generate_rag_prompt(query, retrieved_contexts, chat_history, context_window):
-    history_context = ""
-    if chat_history:
-        relevant_history = chat_history[-context_window*2:]
-        history_context = "Previous conversation context:\n" + "\n".join(
-            f"{('User' if msg['role'] == 'user' else 'Assistant')} [{msg['timestamp']}]: {msg['content']}"
-            for msg in relevant_history
-        ) + "\n"
-
-    prompt = f"""
-    Answer based on the provided document context and conversation history.
-    If insufficient information, say "I don't have enough information to answer accurately."
-    {history_context}
-    Document context:
-    {retrieved_contexts}
-    Current Question: {query}
-    Answer:
-    """
-    return prompt
-
 def generate_response(user_message, vector_db, model_instance, model_name, temp, top_p, max_tokens, context_window):
     is_financial_query = any(
         term in user_message.lower() for term in
@@ -615,7 +483,7 @@ def generate_response(user_message, vector_db, model_instance, model_name, temp,
     is_document_query = any(
         term in user_message.lower() for term in
         ["document", "pdf", "report", "annual", "file", "page"]
-    ) or vector_db is not None
+    )
 
     response_text = ""
 
@@ -634,40 +502,23 @@ def generate_response(user_message, vector_db, model_instance, model_name, temp,
         except Exception as e:
             response_text += f"Error processing financial query: {str(e)}"
 
-    if is_document_query and vector_db and model_name.startswith("gemini"):
-        recent_context = " ".join([msg["content"] for msg in state['chat_history'][-context_window*2:]])
-        augmented_query = f"{recent_context} {user_message}"
-        search_results = vector_db.search(augmented_query, top_k=5)
-
-        if not search_results:
-            response_text += "\nI couldn't find relevant information in the documents to answer your question."
-        else:
-            retrieved_contexts = "\n".join(
-                f"[Document {i+1}: {result['metadata'].get('source', 'Unknown')}]\n{result['text']}\n"
-                for i, result in enumerate(search_results)
-            )
-            rag_prompt = generate_rag_prompt(user_message, retrieved_contexts, state['chat_history'], context_window)
+    if is_document_query:
+        # Without FAISS, we'll use a simple context from processed files if available
+        if state['processed_files']:
+            doc_context = "Processed document context is available but not searchable in detail without specific content."
             try:
-                response = model_instance.generate_content(rag_prompt)
+                response = model_instance.generate_content(f"{doc_context}\nQuestion: {user_message}")
                 doc_response = response.text
                 url_pattern = r'(https?://[^\s\)]+)'
                 doc_response = re.sub(url_pattern, r'[\1](\1)', doc_response)
                 response_text += f"\nDocument-based response:\n{doc_response}"
             except Exception as e:
                 response_text += f"\nError processing document query: {str(e)}"
+        else:
+            response_text += "\nNo documents have been processed to provide context for this query."
 
     if not response_text:
-        combined_context = ""
-        if vector_db:
-            search_results = vector_db.search(user_message, top_k=3)
-            if search_results:
-                combined_context += "Document context:\n" + "\n".join(
-                    f"[Doc {i+1}: {result['metadata'].get('source', 'Unknown')}]\n{result['text']}\n"
-                    for i, result in enumerate(search_results)
-                ) + "\n"
-        if is_financial_query:
-            combined_context += prepare_system_context(user_message)
-
+        combined_context = prepare_system_context(user_message)
         try:
             if model_name.startswith("llama"):
                 response = groq_client.chat.completions.create(
@@ -707,7 +558,6 @@ class ChatRequest(BaseModel):
 class SearchCompaniesRequest(BaseModel):
     search_text: str
     limit: int = 5
-
 
 def app_cleanup():
     driver.close()

@@ -12,7 +12,6 @@ pytesseract
 Pillow
 fitz
 reportlab
-faiss-cpu
 sentence-transformers
 neo4j
 groq

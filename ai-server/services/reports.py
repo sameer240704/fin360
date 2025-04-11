@@ -1,29 +1,45 @@
-import os, uuid, json, re, base64, sqlite3, tempfile
+import os
+import uuid
+import json
+import re
+import base64
+import sqlite3
+import tempfile
+import logging
 from fastapi import HTTPException
 from pydantic import BaseModel
-from typing import List
+from typing import List, Optional
 import requests
 import pdfkit
 import markdown
 from google.generativeai import GenerativeModel, configure
-import faiss
-from sentence_transformers import SentenceTransformer
 from dotenv import load_dotenv
+
+# Set up logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 load_dotenv()
 
+# Validate environment variables
 MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 DB_NAME = os.getenv("DB_NAME")
 DATABASE_DIR = os.getenv("DATABASE_DIR")
 
+if not all([MISTRAL_API_KEY, GEMINI_API_KEY, DB_NAME, DATABASE_DIR]):
+    logger.error("Missing required environment variables")
+    raise ValueError("Missing one or more required environment variables: MISTRAL_API_KEY, GEMINI_API_KEY, DB_NAME, DATABASE_DIR")
+
 configure(api_key=GEMINI_API_KEY)
 
 if not os.path.exists(DATABASE_DIR):
-    os.makedirs(DATABASE_DIR)
-
-# Initialize SentenceTransformer for embeddings
-embedder = SentenceTransformer('all-MiniLM-L6-v2')
+    try:
+        os.makedirs(DATABASE_DIR)
+        logger.info(f"Created directory: {DATABASE_DIR}")
+    except OSError as e:
+        logger.error(f"Failed to create directory {DATABASE_DIR}: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to create directory {DATABASE_DIR}: {str(e)}")
 
 # Models
 class DocumentAnalysisRequest(BaseModel):
@@ -38,75 +54,69 @@ class ChatRequest(BaseModel):
 # Initialize database
 def init_db():
     """Initialize the SQLite database and create the table if it doesn't exist."""
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS financial_data (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            file_hash TEXT UNIQUE,
-            file_name TEXT,
-            extracted_text TEXT,
-            analysis_result TEXT,
-            extracted_tables TEXT,
-            faiss_index_path TEXT,
-            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-    conn.commit()
-    conn.close()
+    try:
+        conn = sqlite3.connect(DB_NAME)
+        c = conn.cursor()
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS financial_data (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                file_hash TEXT UNIQUE,
+                file_name TEXT,
+                extracted_text TEXT,
+                analysis_result TEXT,
+                extracted_tables TEXT,
+                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        conn.commit()
+        logger.info(f"Database initialized at {DB_NAME}")
+    except sqlite3.Error as e:
+        logger.error(f"Database initialization failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Database initialization failed: {str(e)}")
+    finally:
+        conn.close()
 
 init_db()
 
-def save_to_db(file_hash, file_name, extracted_text, analysis_result, extracted_tables, faiss_index_path):
-    """Save extracted text, tables, analysis result, and FAISS index path to the database."""
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute('''
-        INSERT OR REPLACE INTO financial_data 
-        (file_hash, file_name, extracted_text, analysis_result, extracted_tables, faiss_index_path)
-        VALUES (?, ?, ?, ?, ?, ?)
-    ''', (file_hash, file_name, extracted_text, analysis_result, extracted_tables, faiss_index_path))
-    conn.commit()
-    conn.close()
+def save_to_db(file_hash: str, file_name: str, extracted_text: str, analysis_result: str, extracted_tables: str):
+    """Save extracted text, tables, and analysis result to the database."""
+    try:
+        conn = sqlite3.connect(DB_NAME)
+        c = conn.cursor()
+        c.execute('''
+            INSERT OR REPLACE INTO financial_data 
+            (file_hash, file_name, extracted_text, analysis_result, extracted_tables)
+            VALUES (?, ?, ?, ?, ?)
+        ''', (file_hash, file_name, extracted_text, analysis_result, extracted_tables))
+        conn.commit()
+        logger.info(f"Saved data for file_hash: {file_hash}")
+    except sqlite3.Error as e:
+        logger.error(f"Failed to save to database: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to save to database: {str(e)}")
+    finally:
+        conn.close()
 
-def get_existing_data(file_hash):
+def get_existing_data(file_hash: str) -> Optional[tuple]:
     """Retrieve existing data from the database based on file hash."""
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute('SELECT file_name, extracted_text, analysis_result, extracted_tables, faiss_index_path FROM financial_data WHERE file_hash = ?', (file_hash,))
-    result = c.fetchone()
-    conn.close()
-    return result
+    try:
+        conn = sqlite3.connect(DB_NAME)
+        c = conn.cursor()
+        c.execute('SELECT file_name, extracted_text, analysis_result, extracted_tables FROM financial_data WHERE file_hash = ?', (file_hash,))
+        result = c.fetchone()
+        logger.info(f"Retrieved data for file_hash: {file_hash}")
+        return result
+    except sqlite3.Error as e:
+        logger.error(f"Failed to retrieve data from database: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to retrieve data: {str(e)}")
+    finally:
+        conn.close()
 
-def get_all_faiss_indexes():
-    """Retrieve all FAISS index paths and file names from the database."""
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute('SELECT file_name, faiss_index_path FROM financial_data')
-    results = c.fetchall()
-    conn.close()
-    return results
-
-def build_faiss_index(text_chunks, file_hash):
-    """Build and save a FAISS index from text chunks with a dynamic name."""
-    if not text_chunks:
-        return None, None, None
-    embeddings = embedder.encode(text_chunks, convert_to_numpy=True)
-    dimension = embeddings.shape[1]
-    index = faiss.IndexFlatL2(dimension)  # L2 distance index
-    index.add(embeddings)
-    faiss_index_path = os.path.join(DATABASE_DIR, f"faiss_{file_hash}.index")
-    faiss.write_index(index, faiss_index_path)
-    return index, embeddings, faiss_index_path
-
-def load_faiss_index(faiss_index_path):
-    """Load the FAISS index from file if it exists."""
-    if os.path.exists(faiss_index_path):
-        return faiss.read_index(faiss_index_path)
-    return None
-
-def extract_text_with_mistral(file_obj, pages_to_process):
-    """Extract text from PDF file object using Mistral AI OCR API"""
+def extract_text_with_mistral(file_obj, pages_to_process: List[int]):
+    """Extract text from PDF file object using Mistral AI OCR API."""
+    if not hasattr(file_obj, 'seek') or not hasattr(file_obj, 'read'):
+        logger.error("Invalid file object provided")
+        raise HTTPException(status_code=400, detail="Invalid file object provided")
+    
     try:
         file_obj.seek(0)
         pdf_content = file_obj.read()
@@ -132,40 +142,45 @@ def extract_text_with_mistral(file_obj, pages_to_process):
             "image_min_size": 0
         }
         
+        logger.info("Sending request to Mistral API")
         response = requests.post(api_url, headers=headers, json=payload)
         response.raise_for_status()
         
         result = response.json()
         if not isinstance(result, dict) or "pages" not in result:
             raise ValueError("Invalid response format from Mistral API")
-            
+        
+        logger.info("Text extracted successfully from Mistral API")
         return result
         
     except requests.exceptions.RequestException as e:
-        raise HTTPException(
-            status_code=502,
-            detail=f"Mistral API request failed: {str(e)}"
-        )
+        logger.error(f"Mistral API request failed: {str(e)}")
+        raise HTTPException(status_code=502, detail=f"Mistral API request failed: {str(e)}")
     except ValueError as e:
-        raise HTTPException(
-            status_code=502,
-            detail=f"Invalid response from Mistral API: {str(e)}"
-        )
+        logger.error(f"Invalid response from Mistral API: {str(e)}")
+        raise HTTPException(status_code=502, detail=f"Invalid response from Mistral API: {str(e)}")
     except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Error processing with Mistral: {str(e)}"
-        )
+        logger.error(f"Error processing with Mistral: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error processing with Mistral: {str(e)}")
 
-def extract_tables_from_text(text_content):
-    """Extract tables from the markdown text content"""
-    table_pattern = r'(\|[^\n]+\|\n\|[-:| ]+\|\n(?:\|[^\n]+\|\n)+)'
-    tables = re.findall(table_pattern, text_content)
-    return tables
-
-def create_summary_tables(analysis_text):
-    """Ask Gemini to create summary tables based on the analysis"""
+def extract_tables_from_text(text_content: str) -> List[str]:
+    """Extract tables from the markdown text content."""
     try:
+        table_pattern = r'(\|[^\n]+\|\n\|[-:| ]+\|\n(?:\|[^\n]+\|\n)+)'
+        tables = re.findall(table_pattern, text_content)
+        logger.info(f"Extracted {len(tables)} tables from text")
+        return tables
+    except Exception as e:
+        logger.error(f"Error extracting tables: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error extracting tables: {str(e)}")
+
+def create_summary_tables(analysis_text: str) -> str:
+    """Ask Gemini to create summary tables based on the analysis."""
+    try:
+        if not analysis_text or not isinstance(analysis_text, str):
+            logger.error("Invalid or empty analysis_text provided")
+            raise HTTPException(status_code=400, detail="Analysis text is invalid or empty")
+
         model = GenerativeModel('gemini-2.0-flash')
         prompt = f"""
         Based on the following financial analysis, create 3-5 summary tables in Markdown format. 
@@ -192,28 +207,44 @@ def create_summary_tables(analysis_text):
         Analysis:
         {analysis_text}
         """
+        
+        logger.info("Generating summary tables with Gemini")
+        logger.debug(f"Prompt length: {len(prompt)} characters")
+        
+        # Truncate if too long (example limit)
+        if len(prompt) > 30000:
+            analysis_text = analysis_text[:10000] + "... [Truncated for processing]"
+            prompt = prompt.replace(analysis_text, analysis_text[:10000] + "... [Truncated]")
+            logger.warning("Prompt truncated to fit within reasonable limits")
+
         response = model.generate_content(prompt)
+        
+        if not hasattr(response, 'text') or not response.text:
+            logger.error("Gemini API returned an invalid or empty response")
+            raise ValueError("Gemini API returned an invalid or empty response")
+        
+        logger.info("Summary tables generated successfully")
         return response.text
+    except ValueError as e:
+        logger.error(f"ValueError in create_summary_tables: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error creating summary tables: {str(e)}")
     except Exception as e:
+        logger.error(f"Unexpected error in create_summary_tables: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error creating summary tables with Gemini: {str(e)}")
 
-def analyze_with_gemini(text_content, pages_to_process):
+def analyze_with_gemini(text_content: str, pages_to_process: List[int]) -> str:
     """Analyze the extracted text with Google's Gemini API and include detailed citations."""
     try:
-        # First, let's create page-specific segments to be able to track data sources
         page_text_dict = {}
-        current_text = ""
         page_markers = re.findall(r'\n\*\*Page (\d+)\*\*\n', text_content)
         if page_markers:
-            # If we have explicit page markers
             segments = re.split(r'\n\*\*Page \d+\*\*\n', text_content)
             for i, page_num in enumerate(page_markers):
                 if i + 1 < len(segments):
                     page_text_dict[page_num] = segments[i + 1]
         else:
-            # If no explicit markers, divide text by estimated page size
             words = text_content.split()
-            words_per_page = 500  # Estimated words per page
+            words_per_page = 500
             for i, page in enumerate(pages_to_process):
                 start_idx = i * words_per_page
                 end_idx = (i + 1) * words_per_page
@@ -264,26 +295,24 @@ def analyze_with_gemini(text_content, pages_to_process):
         Page-specific content:
         {json.dumps(page_text_dict)}
         """
+        logger.info("Analyzing document with Gemini")
         response = model.generate_content(prompt)
-        
-        # Post-process to ensure citations are properly formatted
         analysis_text = response.text
         
-        # Add an overview of pages processed at the beginning
         page_overview = f"""
 ## DOCUMENT INFORMATION
 - **Pages Analyzed:** {', '.join(map(str, pages_to_process))}
 - **Total Pages Processed:** {len(pages_to_process)}
 
 """
-        analysis_text = page_overview + analysis_text
-        
-        return analysis_text
+        logger.info("Document analysis completed")
+        return page_overview + analysis_text
     except Exception as e:
+        logger.error(f"Error analyzing with Gemini: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error analyzing with Gemini: {str(e)}")
 
-def chat_with_gemini_simple(context, user_query):
-    """Simple chat with Gemini without FAISS."""
+def chat_with_gemini_simple(context: str, user_query: str) -> str:
+    """Simple chat with Gemini."""
     try:
         model = GenerativeModel('gemini-2.0-flash')
         prompt = f"""
@@ -303,124 +332,45 @@ def chat_with_gemini_simple(context, user_query):
         
         If your response should include data, present it in a well-formatted table using Markdown syntax.
         """
+        logger.info("Processing chat query with Gemini")
         response = model.generate_content(prompt)
+        logger.info("Chat response generated successfully")
         return response.text
     except Exception as e:
+        logger.error(f"Error chatting with Gemini: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error chatting with Gemini: {str(e)}")
 
-def chat_with_gemini_faiss(context_chunks, index, full_context, user_query, k=3):
-    """Chat with Gemini using FAISS to retrieve relevant context, combined with full context from DB."""
-    if not full_context or not full_context.strip():
-        return "No full context available to process the query."
-
-    if not context_chunks:
-        # Fallback to full context if no chunks are available
-        return chat_with_gemini_simple(full_context, user_query)
-    
-    # Adjust k to be at most the number of chunks
-    k = min(k, len(context_chunks))
-    if k == 0:
-        # Fallback to full context if k becomes 0
-        return chat_with_gemini_simple(full_context, user_query)
-    
-    query_embedding = embedder.encode([user_query], convert_to_numpy=True)
-    distances, indices = index.search(query_embedding, k)  # Retrieve top-k similar chunks
-    
-    # Filter valid indices
-    valid_indices = [i for i in indices[0] if i >= 0 and i < len(context_chunks)]
-    if not valid_indices:
-        # Fallback to full context if no relevant chunks are found
-        return chat_with_gemini_simple(full_context, user_query)
-    
-    relevant_chunks = [context_chunks[i] for i in valid_indices]
-    relevant_context = "\n\n".join(relevant_chunks)
-    
-    try:
-        model = GenerativeModel('gemini-2.0-flash')
-        prompt = f"""
-        Based on the following full context and the most relevant sections, answer the user's query:
-        
-        Full Context:
-        {full_context}
-        
-        Most Relevant Sections:
-        {relevant_context}
-        
-        User Query:
-        {user_query}
-        
-        IMPORTANT FOR CITATIONS:
-        1. Always support your answer with specific citations from the document in [Page X] format
-        2. Quote relevant text that supports your answer
-        3. List the evidence that led to your conclusion for each major point
-        4. If you make any inference not directly stated in the document, mark it as [Inference]
-        5. If the information seems incomplete or uncertain, acknowledge this and explain what additional information would help
-        
-        If your response should include data, present it in a well-formatted table using Markdown syntax.
-        """
-        response = model.generate_content(prompt)
-        return response.text
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error chatting with Gemini: {str(e)}")
-
-def extract_page_numbers(text_content):
+def extract_page_numbers(text_content: str) -> dict:
     """Extract page numbers from text content to improve citation accuracy."""
-    page_numbers = {}
-    lines = text_content.split('\n')
-    current_page = 1
-    
-    for i, line in enumerate(lines):
-        # Look for page markers like "Page X" or "Page X of Y"
-        page_match = re.search(r'(?i)page\s+(\d+)(?:\s+of\s+\d+)?', line)
-        if page_match:
-            current_page = int(page_match.group(1))
-            start_line = i
-            page_numbers[current_page] = {
-                'start_line': start_line,
-                'content': line
-            }
-    
-    # Add end lines for each page
-    sorted_pages = sorted(page_numbers.keys())
-    for i, page in enumerate(sorted_pages):
-        if i < len(sorted_pages) - 1:
-            page_numbers[page]['end_line'] = page_numbers[sorted_pages[i+1]]['start_line'] - 1
-        else:
-            page_numbers[page]['end_line'] = len(lines) - 1
-    
-    return page_numbers
+    try:
+        page_numbers = {}
+        lines = text_content.split('\n')
+        current_page = 1
+        
+        for i, line in enumerate(lines):
+            page_match = re.search(r'(?i)page\s+(\d+)(?:\s+of\s+\d+)?', line)
+            if page_match:
+                current_page = int(page_match.group(1))
+                page_numbers[current_page] = {'start_line': i, 'content': line}
+        
+        sorted_pages = sorted(page_numbers.keys())
+        for i, page in enumerate(sorted_pages):
+            if i < len(sorted_pages) - 1:
+                page_numbers[page]['end_line'] = page_numbers[sorted_pages[i+1]]['start_line'] - 1
+            else:
+                page_numbers[page]['end_line'] = len(lines) - 1
+        
+        logger.info(f"Extracted {len(page_numbers)} page markers")
+        return page_numbers
+    except Exception as e:
+        logger.error(f"Error extracting page numbers: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error extracting page numbers: {str(e)}")
 
-def split_into_chunks(text, chunk_size=200):
-    """Split text into smaller chunks for FAISS indexing."""
-    if not text or not text.strip():
-        return []
-    words = text.split()
-    
-    # Add page number information to chunks when possible
-    chunks = []
-    page_info = extract_page_numbers(text)
-    
-    for i in range(0, len(words), chunk_size):
-        chunk = ' '.join(words[i:i + chunk_size])
-        # Try to find page number for this chunk
-        for page_num, page_data in page_info.items():
-            chunk_position = text.find(chunk)
-            if chunk_position >= 0:
-                chunk_line = text[:chunk_position].count('\n')
-                if page_data['start_line'] <= chunk_line <= page_data['end_line']:
-                    chunk = f"[Page {page_num}] {chunk}"
-                    break
-        chunks.append(chunk)
-    
-    return chunks
-
-def convert_markdown_to_pdf(markdown_content, output_path):
+def convert_markdown_to_pdf(markdown_content: str, output_path: str) -> tuple[bool, Optional[str]]:
     """Convert markdown content to PDF using alternative methods with fallbacks."""
     try:
-        # Convert markdown to HTML
         html_content = markdown.markdown(markdown_content, extensions=['tables', 'fenced_code'])
         
-        # Add basic styling for better appearance
         styled_html = f"""
         <!DOCTYPE html>
         <html>
@@ -446,14 +396,12 @@ def convert_markdown_to_pdf(markdown_content, output_path):
         </html>
         """
         
-        # Create temporary HTML file
         with tempfile.NamedTemporaryFile(suffix='.html', delete=False, mode='w', encoding='utf-8') as temp_html:
             temp_html_path = temp_html.name
             temp_html.write(styled_html)
         
         try:
-            print(f"Attempting PDF conversion with pdfkit for file: {output_path}")
-            
+            logger.info(f"Attempting PDF conversion with pdfkit for file: {output_path}")
             wkhtmltopdf_paths = [
                 '/usr/local/bin/wkhtmltopdf',
                 '/usr/bin/wkhtmltopdf',
@@ -464,11 +412,10 @@ def convert_markdown_to_pdf(markdown_content, output_path):
             config = None
             for path in wkhtmltopdf_paths:
                 if os.path.exists(path):
-                    print(f"Found wkhtmltopdf at: {path}")
+                    logger.info(f"Found wkhtmltopdf at: {path}")
                     config = pdfkit.configuration(wkhtmltopdf=path)
                     break
             
-            # Use the config if found
             pdf_options = {
                 'quiet': '',
                 'enable-local-file-access': '',
@@ -478,40 +425,74 @@ def convert_markdown_to_pdf(markdown_content, output_path):
             if config:
                 pdfkit.from_file(temp_html_path, output_path, configuration=config, options=pdf_options)
             else:
-                # Try with default installation
                 pdfkit.from_file(temp_html_path, output_path, options=pdf_options)
             
-            # If we reach here, PDF was created successfully
-            os.remove(temp_html_path)  # Clean up temp file
+            os.remove(temp_html_path)
+            logger.info(f"PDF generated successfully at {output_path}")
             return True, None
             
         except Exception as e:
             error_msg = f"pdfkit/wkhtmltopdf error: {str(e)}"
-            print(error_msg)
+            logger.error(error_msg)
             
-            # Method 2: Alternative - Try using weasyprint if installed
             try:
                 import weasyprint
-                print("Attempting PDF generation with WeasyPrint")
+                logger.info("Attempting PDF generation with WeasyPrint")
                 weasyprint.HTML(string=styled_html).write_pdf(output_path)
-                os.remove(temp_html_path)  # Clean up temp file
+                os.remove(temp_html_path)
+                logger.info(f"PDF generated with WeasyPrint at {output_path}")
                 return True, None
             except ImportError:
-                pass
+                logger.warning("WeasyPrint not installed, skipping this fallback")
             except Exception as e2:
                 error_msg += f" | WeasyPrint error: {str(e2)}"
             
-            # Method 3: Save HTML as fallback
             html_output_path = output_path.replace('.pdf', '.html')
-            print(f"Saving HTML as fallback to: {html_output_path}")
+            logger.info(f"Saving HTML as fallback to: {html_output_path}")
             try:
                 import shutil
                 shutil.copy(temp_html_path, html_output_path)
-                os.remove(temp_html_path)  # Clean up temp file
+                os.remove(temp_html_path)
                 return False, f"PDF generation failed. Saved HTML version instead: {html_output_path}. Original errors: {error_msg}"
             except Exception as e3:
-                os.remove(temp_html_path)  # Clean up temp file
+                os.remove(temp_html_path)
                 return False, f"All PDF conversion methods failed: {error_msg} | HTML fallback error: {str(e3)}"
                 
     except Exception as e:
+        logger.error(f"Initial markdown conversion failed: {str(e)}")
         return False, f"Initial markdown conversion failed: {str(e)}"
+
+# Example usage in a FastAPI app (for testing)
+if __name__ == "__main__":
+    from fastapi import FastAPI
+    from fastapi import UploadFile, File
+    import hashlib
+
+    app = FastAPI()
+
+    @app.post("/generate-summary/")
+    async def generate_summary(file: UploadFile = File(...), pages: List[int] = []):
+        try:
+            # Step 1: Extract text from PDF
+            extracted_data = extract_text_with_mistral(file.file, pages)
+            extracted_text = json.dumps(extracted_data)  # Adjust based on Mistral response format
+            
+            # Step 2: Analyze with Gemini
+            analysis_result = analyze_with_gemini(extracted_text, pages)
+            
+            # Step 3: Generate summary tables
+            summary_tables = create_summary_tables(analysis_result)
+            
+            # Step 4: Save to DB with a simple hash
+            file_hash = hashlib.sha256(file.filename.encode()).hexdigest()
+            save_to_db(file_hash, file.filename, extracted_text, analysis_result, summary_tables)
+            
+            return {"summary_tables": summary_tables}
+        except HTTPException as e:
+            raise e
+        except Exception as e:
+            logger.error(f"Unexpected error in generate_summary endpoint: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
