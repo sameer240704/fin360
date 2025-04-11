@@ -5,7 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from PyPDF2 import PdfReader
 from fastapi.templating import Jinja2Templates
 from typing import List, Dict, Optional
-import uuid, json, os, io, base64, tempfile, sqlite3, hashlib, re
+import uuid, json, os, io, base64, tempfile, sqlite3, hashlib, re, logging
 import stocks_data
 from services.gemini_game_flow import get_gemini_response
 from services.stocks_data import fetch_multiple_stocks
@@ -17,19 +17,18 @@ from services.business_model import extract_text, generate_business_models, gene
 from services.sentimental_analysis import extract_text_from_pdf, analyze_sentiment, create_pdf_report
 from pinecone import Pinecone, ServerlessSpec  # Updated to correct package
 from google.generativeai import GenerativeModel, configure
-import requests
 from pydantic import BaseModel, ConfigDict
+from dotenv import load_dotenv
+from pathlib import Path
 
-# Hardcoded API keys
-MISTRAL_API_KEY = "JZslDyH2l2tQHDksRbDfHYVKgO50LfkN"
-GEMINI_API_KEY = "AIzaSyAwY29cyESToWBGM3Rg2mEghTJUGyMaoJw"
+load_dotenv()
 
-# Configure Gemini
+GEMINI_API_KEY = os.getenv("MISTRAL_API_KEY")
 configure(api_key=GEMINI_API_KEY)
 
 # Pinecone setup
-PINECONE_API_KEY = "pcsk_4XsyED_G6HLxQCbXeRFi5Skd68yUunAWgjpZ7QzxBP38Bmu2mveRNHWgn9VoTMWoDuXa3M"
-PINECONE_ENVIRONMENT = "us-east-1"  # Valid AWS region
+PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
+PINECONE_ENVIRONMENT = os.getenv("PINECONE_ENVIRONMENT")
 pc = Pinecone(api_key=PINECONE_API_KEY)
 
 # Database and directory setup
@@ -40,6 +39,13 @@ REPORT_DIR = "reports"
 os.makedirs(DATABASE_DIR, exist_ok=True)
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(REPORT_DIR, exist_ok=True)
+
+# Logging 
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Fin360")
 
@@ -614,48 +620,99 @@ async def upload_file(
     pages_to_process: str = Form("[]"),
 ):
     try:
-        file_content = await file.read()
-        file_hash = get_file_hash(file_content)
+        logger.info(f"Starting file upload processing for file: {file.filename}")
+        
+        # Read file content
+        try:
+            file_content = await file.read()
+            file_hash = get_file_hash(file_content)
+            logger.info(f"File hash calculated: {file_hash}")
+        except Exception as e:
+            logger.error(f"Error reading file or calculating hash: {str(e)}")
+            raise HTTPException(
+                status_code=400,
+                detail=f"Error processing file: {str(e)}"
+            )
 
-        existing_data = get_existing_data(file_hash)
-        if existing_data:
-            file_name, extracted_text, analysis_result, extracted_tables, pinecone_index_name = existing_data
-            return JSONResponse(content={
-                "status": "success",
-                "message": f"Found existing analysis for '{file_name}' in the database!",
-                "data": {
-                    "file_name": file_name,
-                    "extracted_text": extracted_text,
-                    "analysis_result": analysis_result,
-                    "extracted_tables": json.loads(extracted_tables) if extracted_tables else [],
-                    "pinecone_index_name": pinecone_index_name
-                }
-            })
+        # Check for existing data
+        try:
+            existing_data = get_existing_data(file_hash)
+            if existing_data:
+                file_name, extracted_text, analysis_result, extracted_tables, pinecone_index_name = existing_data
+                logger.info(f"Found existing analysis for file hash: {file_hash}")
+                return JSONResponse(content={
+                    "status": "success",
+                    "message": f"Found existing analysis for '{file_name}' in the database!",
+                    "data": {
+                        "file_name": file_name,
+                        "extracted_text": extracted_text,
+                        "analysis_result": analysis_result,
+                        "extracted_tables": json.loads(extracted_tables) if extracted_tables else [],
+                        "pinecone_index_name": pinecone_index_name
+                    }
+                })
+        except Exception as e:
+            logger.error(f"Error checking for existing data: {str(e)}")
+            raise HTTPException(
+                status_code=500,
+                detail="Error checking database for existing analysis"
+            )
 
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
-            tmp_file.write(file_content)
-            tmp_path = tmp_file.name
+        # Save to temporary file
+        try:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
+                tmp_file.write(file_content)
+                tmp_path = Path(tmp_file.name)
+                logger.info(f"Saved temporary file to: {tmp_path}")
+        except Exception as e:
+            logger.error(f"Error creating temporary file: {str(e)}")
+            raise HTTPException(
+                status_code=500,
+                detail="Error saving temporary file"
+            )
 
         try:
-            with open(tmp_path, "rb") as pdf_file:
-                pdf_reader = PdfReader(pdf_file)
-                num_pages = len(pdf_reader.pages)
-                
-                pages = json.loads(pages_to_process)
-                if not pages:
-                    pages = list(range(num_pages))
-                else:
-                    invalid_pages = [p for p in pages if p >= num_pages or p < 0]
-                    if invalid_pages:
-                        raise HTTPException(
-                            status_code=400,
-                            detail=f"Invalid page numbers: {invalid_pages}. Document has {num_pages} pages."
-                        )
+            # Process PDF
+            try:
+                with open(tmp_path, "rb") as pdf_file:
+                    pdf_reader = PdfReader(pdf_file)
+                    num_pages = len(pdf_reader.pages)
+                    logger.info(f"PDF has {num_pages} pages")
+                    
+                    pages = json.loads(pages_to_process)
+                    if not pages:
+                        pages = list(range(num_pages))
+                        logger.info(f"Processing all pages: {pages}")
+                    else:
+                        invalid_pages = [p for p in pages if p >= num_pages or p < 0]
+                        if invalid_pages:
+                            logger.error(f"Invalid page numbers: {invalid_pages}. Document has {num_pages} pages.")
+                            raise HTTPException(
+                                status_code=400,
+                                detail=f"Invalid page numbers: {invalid_pages}. Document has {num_pages} pages."
+                            )
+                        logger.info(f"Processing specific pages: {pages}")
+            except json.JSONDecodeError:
+                logger.error("Invalid pages_to_process JSON format")
+                raise HTTPException(
+                    status_code=400,
+                    detail="Invalid pages_to_process format. Must be a JSON array of page numbers."
+                )
+            except Exception as e:
+                logger.error(f"Error reading PDF: {str(e)}")
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Error processing PDF: {str(e)}"
+                )
 
+            # Extract text
+            try:
                 pdf_file.seek(0)
                 ocr_result = extract_text_with_mistral(pdf_file, pages)
+                logger.info("Text extraction completed")
                 
                 if not ocr_result or "pages" not in ocr_result:
+                    logger.error("Invalid OCR result format or empty result")
                     raise HTTPException(
                         status_code=500,
                         detail="Failed to extract text from PDF or invalid response format"
@@ -669,21 +726,56 @@ async def upload_file(
                         all_text += f"\n**Page {page_num}**\n{page_content}\n\n"
 
                 if not all_text.strip():
+                    logger.error("No text content extracted from PDF")
                     raise HTTPException(
                         status_code=500,
                         detail="No text content could be extracted from the PDF"
                     )
+            except Exception as e:
+                logger.error(f"Error during text extraction: {str(e)}")
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Error during text extraction: {str(e)}"
+                )
 
+            # Extract tables
+            try:
                 tables = extract_tables_from_text(all_text)
+                logger.info(f"Extracted {len(tables)} tables from text")
+            except Exception as e:
+                logger.error(f"Error extracting tables: {str(e)}")
+                tables = []
+                # Continue processing even if table extraction fails
+
+            # Analyze content
+            try:
                 analysis = analyze_with_gemini(all_text, pages)
                 summary_tables = create_summary_tables(analysis)
                 combined_analysis = f"{analysis}\n\n## SUMMARY TABLES\n\n{summary_tables}"
-                
+                logger.info("Content analysis completed")
+            except Exception as e:
+                logger.error(f"Error during content analysis: {str(e)}")
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Error during content analysis: {str(e)}"
+                )
+
+            # Build Pinecone index
+            try:
                 context_chunks = split_into_chunks(all_text)
-                short_hash = file_hash[:20]  # Take first 20 characters of hash
+                short_hash = file_hash[:20]
                 pinecone_index_name = f"financial-{short_hash}"
-                build_pinecone_index(context_chunks, file_hash)  # Build index with original hash for consistency
-                
+                build_pinecone_index(context_chunks, file_hash)
+                logger.info(f"Pinecone index created: {pinecone_index_name}")
+            except Exception as e:
+                logger.error(f"Error building Pinecone index: {str(e)}")
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Error building search index: {str(e)}"
+                )
+
+            # Save to database
+            try:
                 save_to_db(
                     file_hash,
                     file.filename,
@@ -692,32 +784,43 @@ async def upload_file(
                     json.dumps(tables),
                     pinecone_index_name
                 )
+                logger.info("Data saved to database successfully")
+            except Exception as e:
+                logger.error(f"Error saving to database: {str(e)}")
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Error saving results to database: {str(e)}"
+                )
 
-                return JSONResponse(content={
-                    "status": "success",
-                    "message": "Analysis completed successfully",
-                    "data": {
-                        "file_name": file.filename,
-                        "extracted_text": all_text,
-                        "analysis_result": combined_analysis,
-                        "extracted_tables": tables,
-                        "pinecone_index_name": pinecone_index_name,
-                        "file_hash": file_hash
-                    }
-                })
-        
+            return JSONResponse(content={
+                "status": "success",
+                "message": "Analysis completed successfully",
+                "data": {
+                    "file_name": file.filename,
+                    "extracted_text": all_text,
+                    "analysis_result": combined_analysis,
+                    "extracted_tables": tables,
+                    "pinecone_index_name": pinecone_index_name,
+                    "file_hash": file_hash
+                }
+            })
+            
         finally:
             try:
-                os.unlink(tmp_path)
+                if tmp_path.exists():
+                    os.unlink(tmp_path)
+                    logger.info(f"Temporary file {tmp_path} deleted")
             except Exception as e:
-                print(f"Warning: Failed to delete temp file {tmp_path}: {str(e)}")
+                logger.warning(f"Failed to delete temp file {tmp_path}: {str(e)}")
 
-    except json.JSONDecodeError:
-        raise HTTPException(status_code=400, detail="Invalid pages_to_process format")
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}")
+        logger.error(f"Unexpected error in upload_file: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Unexpected error occurred: {str(e)}"
+        )
 
 @app.get("/documents/")
 async def list_documents():
