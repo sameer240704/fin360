@@ -3,7 +3,6 @@ __pycache__/
 *.py[cod]
 *$py.class
 
-/generated_pdfs
 /database
 
 # C extensions
@@ -82,5 +81,3 @@ __pypackages__/
 
 # Test results
 test-results/
-
-predictive_analysis/
