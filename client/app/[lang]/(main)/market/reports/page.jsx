@@ -31,6 +31,7 @@ import {
   Trash2,
   BookOpen,
   SlidersHorizontal,
+  Loader2,
 } from "lucide-react";
 import {
   DropdownMenu,
@@ -487,7 +488,14 @@ const ReportsPage = () => {
               onClick={handleUpload}
               disabled={isLoading}
             >
-              {isLoading ? "Uploading..." : "Upload Report"}
+              {isLoading ? (
+                <div className="flex justify-center items-center">
+                  <h1>Uploading</h1>
+                  <Loader2 className="text-black h-6 w-6 animate-spin duration-500 ml-1" />
+                </div>
+              ) : (
+                "Upload Report"
+              )}
             </Button>
           </DialogFooter>
         </DialogContent>

@@ -5,7 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from PyPDF2 import PdfReader
 from fastapi.templating import Jinja2Templates
 from typing import List, Dict, Optional
-import uuid, json, os, io, base64, tempfile, sqlite3, hashlib, re, markdown
+import uuid, json, os, io, base64, tempfile, sqlite3, hashlib, re
 from dotenv import load_dotenv
 import stocks_data
 from services.gemini_game_flow import get_gemini_response
@@ -272,10 +272,6 @@ async def get_stocks_data():
         return JSONResponse(content={'stocks': stocks_df, 'bonds': bonds_data})
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-    
-@app.on_event("startup")
-async def startup_event():
-    init_state()
 
 @app.get("/default_pdfs", response_model=Dict[str, List[Dict[str, str]]])
 async def get_default_pdfs():
@@ -733,3 +729,14 @@ async def download_pdf(file_hash: str):
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+    
+@app.get("/")
+async def root():
+    """
+    Returns a welcome message for the Fin360 API.
+    """
+    return {
+        "message": "Welcome to Fin360 API - Your comprehensive financial analysis platform.",
+        "description": "This API provides powerful tools for stock analysis, document processing, and AI-powered financial insights.",
+        "documentation": "Visit /docs for API documentation and endpoints."
+    }
