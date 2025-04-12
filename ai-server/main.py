@@ -5,7 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from PyPDF2 import PdfReader
 from fastapi.templating import Jinja2Templates
 from typing import List, Dict, Optional
-import uuid, json, os, io, base64, tempfile, sqlite3, hashlib, re
+import uuid, json, os, io, base64, tempfile, sqlite3, hashlib, re, markdown
 from dotenv import load_dotenv
 import stocks_data
 from services.gemini_game_flow import get_gemini_response
@@ -663,7 +663,7 @@ async def chat_with_document(
         if not existing_data:
             raise HTTPException(status_code=404, detail="Document not found")
             
-        file_name, extracted_text, analysis_result, extracted_tables, _ = existing_data
+        _, extracted_text, analysis_result, _, _ = existing_data
         
         # Choose context source
         context_text = analysis_result if chat_request.context_source == "Analysis Result" else extracted_text
@@ -709,7 +709,7 @@ async def download_pdf(file_hash: str):
         if not existing_data:
             raise HTTPException(status_code=404, detail="Document not found")
             
-        file_name, _, analysis_result, _, _ = existing_data
+        file_name, _, analysis_result, _ = existing_data
         
         pdf_dir = os.path.join(os.getcwd(), "generated_pdfs")
         os.makedirs(pdf_dir, exist_ok=True)
