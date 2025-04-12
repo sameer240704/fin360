@@ -18,7 +18,7 @@ from pydantic import BaseModel
 
 load_dotenv()
 
-path2 = '/home/sameer42/Desktop/Hackathons/d2k3-bournvita-smugglers/ai-server' 
+path2 = '/home/sameer42/Desktop/Hackathons/fin360/ai-server' 
 annual_reports = 'Annual Reports'
 
 genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))

@@ -9,11 +9,8 @@ import { Canvas } from "@react-three/fiber";
 import Chatbot from "./ChatbotUser";
 import { degToRad } from "three/src/math/MathUtils";
 import { Suspense, useState, useEffect } from "react";
-import { TypingBox } from "./TypingBox";
 import MessageBox from "./MessageBox";
 import { useLanguage } from "@/context/LanguageContext";
-import { Thinking } from "@/public/images";
-import Image from "next/image";
 import ChatComponent from "./ChatComponent";
 
 const CameraManager = () => {
@@ -86,15 +83,6 @@ const Experience = () => {
           }`}
         >
           <MessageBox message={latestMessage} />
-        </div>
-        <div
-          className={`z-10 md:justify-center absolute top-3 left-48 flex flex-wrap justify-stretch ${
-            Math.round(progress) !== 100 ? "hidden" : ""
-          }`}
-        >
-          {loading && (
-            <Image src={Thinking} alt="thinking" className="h-20 w-auto" />
-          )}
         </div>
         <Canvas
           camera={{

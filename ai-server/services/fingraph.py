@@ -34,11 +34,23 @@ driver = GraphDatabase.driver(
 groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
 # Define sectors and companies
+# Define sectors and companies
 SECTORS = {
-    "Technology": ["AAPL", "MSFT", "GOOGL", "META"],
-    "Healthcare": ["JNJ", "PFE", "UNH", "ABBV"],
-    "Manufacturing": ["GE", "CAT", "BA", "MMM"],
-    "Finance": ["JPM", "BAC", "GS", "MS"]
+    "Technology": ["AAPL", "MSFT", "GOOGL", "META", "NVDA", "ADBE", "INTC", "CSCO", "ORCL", "IBM"],
+    "Healthcare": ["JNJ", "PFE", "UNH", "ABBV", "MRK", "AMGN", "GILD", "BMY", "TMO", "DHR"],
+    "Manufacturing": ["GE", "CAT", "BA", "MMM", "HON", "DE", "LMT", "RTX", "GD", "ITW"],
+    "Finance": ["JPM", "BAC", "GS", "MS", "C", "WFC", "BLK", "SCHW", "AXP", "PYPL"],
+    "Consumer Goods": ["PG", "KO", "PEP", "NKE", "UL", "MDLZ", "CL", "EL", "KMB", "STZ"],
+    "Retail": ["WMT", "AMZN", "TGT", "HD", "LOW", "COST", "MCD", "SBUX", "TJX", "NKE"],
+    "Energy": ["XOM", "CVX", "COP", "SLB", "EOG", "PSX", "VLO", "MPC", "OXY", "DVN"],
+    "Telecommunications": ["T", "VZ", "TMUS", "CMCSA", "DIS", "CHTR", "VOD", "ORAN", "TEF", "AMX"],
+    "Utilities": ["NEE", "DUK", "SO", "D", "AEP", "EXC", "SRE", "PEG", "ED", "EIX"],
+    "Real Estate": ["AMT", "PLD", "EQIX", "CCI", "PSA", "SPG", "AVB", "WELL", "DLR", "O"],
+    "Biotechnology": ["AMGN", "GILD", "VRTX", "REGN", "BIIB", "MRNA", "BNTX", "ALXN", "INCY", "ILMN"],
+    "Automotive": ["TSLA", "F", "GM", "TM", "HMC", "STLA", "VWAGY", "RACE", "NIO", "LI"],
+    "Aerospace & Defense": ["BA", "LMT", "RTX", "GD", "NOC", "LHX", "TXT", "HII", "BWXT", "KTOS"],
+    "Semiconductors": ["NVDA", "INTC", "TSM", "AMD", "QCOM", "AVGO", "TXN", "ASML", "MU", "LRCX"],
+    "Entertainment": ["DIS", "NFLX", "WBD", "PARA", "SONY", "RBLX", "EA", "TTWO", "ATVI", "LYV"]
 }
 
 # Financial metrics to track

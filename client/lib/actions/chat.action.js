@@ -47,8 +47,6 @@ export async function getAllChatMessages() {
 
         const allChats = await Chat.find().sort({ createdAt: 1 });
 
-        console.log(allChats);
-
         return {
             success: true,
             data: allChats.map((chat) => ({
